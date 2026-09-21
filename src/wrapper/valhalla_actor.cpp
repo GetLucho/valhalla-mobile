@@ -6,12 +6,17 @@
 #include <type_traits>
 #include <utility>
 
+#include <cmath>
 #include <pthread.h>
 
 #include <boost/property_tree/ptree.hpp>
 #include <valhalla/tyr/actor.h>
 #include <valhalla/baldr/rapidjson_utils.h>
+#include <valhalla/baldr/graphid.h>
+#include <valhalla/baldr/graphtile.h>
+#include <valhalla/baldr/tilehierarchy.h>
 #include <valhalla/loki/worker.h>
+#include <valhalla/midgard/pointll.h>
 #include "valhalla_actor.h"
 
 class TileGetterWrapper : public valhalla::baldr::tile_getter_t {
@@ -242,6 +247,10 @@ ValhallaActor::ValhallaActor(const std::string& config_path, ValhallaMobileHttpC
     // Throwing is how the interrupt aborts -- curl_tilegetter's progress callback catches
     // and returns -1 for exactly this, and TileGetterWrapper::get lets it propagate.
     interrupt = [this]() {
+      // Cancellation first: a user who pressed stop should not wait out the deadline.
+      if (cancelled.load(std::memory_order_relaxed)) {
+        throw Cancelled("the action was cancelled");
+      }
       const auto limit = fetch_deadline.load(std::memory_order_relaxed);
       if (limit == 0) {
         return;
@@ -264,11 +273,62 @@ ValhallaActor::ValhallaActor(const std::string& config_path, ValhallaMobileHttpC
     actor = std::make_unique<valhalla::tyr::actor_t>(config, *graph_reader, true);
 }
 
+void ValhallaActor::cancel() {
+    cancelled.store(true, std::memory_order_relaxed);
+}
+
+void ValhallaActor::resume() {
+    cancelled.store(false, std::memory_order_relaxed);
+}
+
+std::vector<ValhallaActor::TileRef> ValhallaActor::tiles_covering(double latitude,
+                                                                 double longitude) const {
+    std::vector<TileRef> covering;
+    // A coordinate off the planet has no tiles rather than a wrong one. PointLL would
+    // happily construct and TileId would return an index into nothing.
+    if (!std::isfinite(latitude) || !std::isfinite(longitude) || latitude < -90.0 ||
+        latitude > 90.0 || longitude < -180.0 || longitude > 180.0) {
+      return covering;
+    }
+
+    const valhalla::midgard::PointLL point{longitude, latitude};
+    // What a tile is called when REQUESTED, which is not what it is called on disk.
+    // With tile_url_gz on, GraphTile::store() writes .gph.gz (graphtile.cc:211-218), but
+    // CacheTileURL builds the fetch name from the plain suffix -- the URL does not change.
+    // So this is always the uncompressed name, and the cached name is valhalla's business.
+    const std::string suffix = valhalla::baldr::SUFFIX_NON_COMPRESSED;
+    for (const auto& level : valhalla::baldr::TileHierarchy::levels()) {
+      TileRef ref;
+      ref.level = level.level;
+      ref.id = static_cast<uint32_t>(level.tiles.TileId(point));
+      ref.path = valhalla::baldr::GraphTile::FileSuffix(
+          valhalla::baldr::GraphId(ref.id, ref.level, 0), suffix, &level);
+      covering.push_back(ref);
+    }
+    return covering;
+}
+
+bool ValhallaActor::ensure_tile_cached(uint32_t level, uint32_t id) {
+    // Armed like any other action, so the deadline and cancel both apply. No deep stack:
+    // that exists for the map matcher's unbounded recursion, and this is one fetch.
+    arm_deadline();
+    // GetGraphTile, not a download of our own: a prefetched tile arrives through exactly
+    // the path a route would have used, so there is one cache, one naming rule, one gzip
+    // decision and one rebuild check rather than two of each.
+    const valhalla::baldr::GraphId graphid(id, level, 0);
+    return static_cast<bool>(graph_reader->GetGraphTile(graphid));
+}
+
 void ValhallaActor::set_tile_fetch_timeout_seconds(double seconds) {
     tile_fetch_timeout_seconds.store(seconds < 0 ? 0 : seconds, std::memory_order_relaxed);
 }
 
 std::string ValhallaActor::with_deadline(const std::function<std::string()>& action) {
+    arm_deadline();
+    return action();
+}
+
+void ValhallaActor::arm_deadline() {
     const auto seconds = tile_fetch_timeout_seconds.load(std::memory_order_relaxed);
     if (seconds <= 0) {
         fetch_deadline.store(0, std::memory_order_relaxed);
@@ -280,7 +340,6 @@ std::string ValhallaActor::with_deadline(const std::function<std::string()>& act
             std::chrono::duration<double>(seconds));
         fetch_deadline.store((now + budget).count(), std::memory_order_relaxed);
     }
-    return action();
 }
 
 std::string ValhallaActor::route(const std::string& request) {
