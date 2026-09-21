@@ -17,6 +17,26 @@
 class TileGetterWrapper : public valhalla::baldr::tile_getter_t {
 public:
   /**
+   * Honour the interrupt GraphReader installs.
+   *
+   * tile_getter_t::set_interrupt has an EMPTY default body, so a getter that does not
+   * override it makes GraphReader::SetInterrupt silently do nothing -- the call succeeds,
+   * the callback is stored, and it is never invoked. That is what this class did.
+   *
+   * It matters because a per-request HTTP timeout does not bound the operation. Both
+   * platform clients already cap a single request at 10 s, and a route against a dead
+   * origin still took 170 seconds measured on an iOS simulator: one route attempts tile
+   * after tile, each paying its own timeout in turn. Bounding the whole operation needs a
+   * check between fetches, which is exactly what this is.
+   *
+   * The interrupt is a std::function<void()> that THROWS to abort; see
+   * curl_tilegetter.h, where the same pointer reaches libcurl's progress callback.
+   */
+  void set_interrupt(const interrupt_t* interrupt) override {
+    interrupt_ = interrupt;
+  }
+
+  /**
    * @param http_client  client used to perform HTTP GET/HEAD tile requests;
    *                      ownership is transferred to the wrapper. May be null,
    *                      in which case requests report FAILURE.
@@ -28,6 +48,11 @@ public:
   GET_response_t get(const std::string& url,
                      const uint64_t range_offset = 0,
                      const uint64_t range_size = 0) override {
+    // Before the request, not after: the point is to stop paying for fetches once the
+    // caller has given up, and a check that runs only afterwards still pays for this one.
+    if (interrupt_) {
+      (*interrupt_)();
+    }
     GET_response_t result;
     if (http_client) { 
         result = http_client->get(url, range_offset, range_size);
@@ -38,6 +63,9 @@ public:
   }
 
   HEAD_response_t head(const std::string& url, header_mask_t header_mask) override {
+    if (interrupt_) {
+      (*interrupt_)();
+    }
     HEAD_response_t result;
     if (http_client) { 
         result = http_client->head(url, header_mask);
@@ -54,6 +82,8 @@ public:
 private:
   bool is_gzipped;
   std::unique_ptr<ValhallaMobileHttpClient> http_client;
+  // Owned by GraphReader, which outlives this getter.
+  const interrupt_t* interrupt_ = nullptr;
 };
 
 
@@ -199,26 +229,80 @@ ValhallaActor::ValhallaActor(const std::string& config_path, ValhallaMobileHttpC
     graph_reader = std::make_unique<valhalla::baldr::GraphReader>(
       mjolnir_config, std::move(tile_getter)
     );
+    // From the config, not from an API call. `mjolnir.tile_url_timeout` is the name
+    // upstream would use if this were upstream -- curler_t's constructor already takes
+    // config-derived strings, so the shape exists -- which keeps a future patch honest and
+    // means a consumer configures the engine in one place instead of two. Seconds, and
+    // absent or 0 means no limit, matching every other optional mjolnir key.
+    set_tile_fetch_timeout_seconds(mjolnir_config.get<double>("tile_url_timeout", 0.0));
+
+    // Installed once, and it must outlive the reader: GraphReader stores the POINTER,
+    // it does not copy the function.
+    //
+    // Throwing is how the interrupt aborts -- curl_tilegetter's progress callback catches
+    // and returns -1 for exactly this, and TileGetterWrapper::get lets it propagate.
+    interrupt = [this]() {
+      const auto limit = fetch_deadline.load(std::memory_order_relaxed);
+      if (limit == 0) {
+        return;
+      }
+      if (std::chrono::steady_clock::now().time_since_epoch().count() > limit) {
+        throw TimedOut("gave up fetching tiles after " +
+                       std::to_string(tile_fetch_timeout_seconds.load(std::memory_order_relaxed)) +
+                       " seconds");
+      }
+    };
+    graph_reader->SetInterrupt(&interrupt);
+
     // Setup the actor
     actor = std::make_unique<valhalla::tyr::actor_t>(config, *graph_reader, true);
 }
 
+void ValhallaActor::set_tile_fetch_timeout_seconds(double seconds) {
+    tile_fetch_timeout_seconds.store(seconds < 0 ? 0 : seconds, std::memory_order_relaxed);
+}
+
+std::string ValhallaActor::with_deadline(const std::function<std::string()>& action) {
+    const auto seconds = tile_fetch_timeout_seconds.load(std::memory_order_relaxed);
+    if (seconds <= 0) {
+        fetch_deadline.store(0, std::memory_order_relaxed);
+    } else {
+        // Armed per action, not per construction: the budget is "this route may spend N
+        // seconds", not "this engine may spend N seconds in its lifetime".
+        const auto now = std::chrono::steady_clock::now().time_since_epoch();
+        const auto budget = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+            std::chrono::duration<double>(seconds));
+        fetch_deadline.store((now + budget).count(), std::memory_order_relaxed);
+    }
+    return action();
+}
+
 std::string ValhallaActor::route(const std::string& request) {
-    return run_on_deep_stack([&]() { return actor->route(request); });
+    return with_deadline([&]() {
+        return run_on_deep_stack([&]() { return actor->route(request); });
+    });
 }
 
 std::string ValhallaActor::trace_route(const std::string& request) {
-    return run_on_deep_stack([&]() { return actor->trace_route(request); });
+    return with_deadline([&]() {
+        return run_on_deep_stack([&]() { return actor->trace_route(request); });
+    });
 }
 
 std::string ValhallaActor::trace_attributes(const std::string& request) {
-    return run_on_deep_stack([&]() { return actor->trace_attributes(request); });
+    return with_deadline([&]() {
+        return run_on_deep_stack([&]() { return actor->trace_attributes(request); });
+    });
 }
 
 std::string ValhallaActor::height(const std::string& request) {
-    return run_on_deep_stack([&]() { return actor->height(request); });
+    return with_deadline([&]() {
+        return run_on_deep_stack([&]() { return actor->height(request); });
+    });
 }
 
 std::string ValhallaActor::matrix(const std::string& request) {
-    return run_on_deep_stack([&]() { return actor->matrix(request); });
+    return with_deadline([&]() {
+        return run_on_deep_stack([&]() { return actor->matrix(request); });
+    });
 }

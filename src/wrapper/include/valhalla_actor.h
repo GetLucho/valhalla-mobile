@@ -1,6 +1,10 @@
 #ifndef VALHALLAACTOR_H
 #define VALHALLAACTOR_H
 
+#include <atomic>
+#include <chrono>
+#include <functional>
+#include <stdexcept>
 #include <string>
 #include <valhalla/tyr/actor.h>
 #include <valhalla/baldr/tilegetter.h>
@@ -81,8 +85,47 @@ class ValhallaActor {
 private:
     std::unique_ptr<valhalla::tyr::actor_t> actor;
     std::unique_ptr<valhalla::baldr::GraphReader> graph_reader;
+
+    /// Seconds an action may spend fetching tiles, or 0 for no limit.
+    std::atomic<double> tile_fetch_timeout_seconds{0.0};
+    /// When the action running now must stop fetching. Steady, so a clock change cannot
+    /// move it. Set at the start of every action and read from the fetching thread.
+    std::atomic<std::chrono::steady_clock::rep> fetch_deadline{0};
+    /// Installed on the GraphReader once, and held here because it stores the pointer.
+    std::function<void()> interrupt;
+
+    /// Arm the deadline for an action about to run, then run it.
+    std::string with_deadline(const std::function<std::string()>& action);
 public:
     ValhallaActor(const std::string& config_path, ValhallaMobileHttpClient* http_client = nullptr);
+
+    /// Raised when an action gave up because [set_tile_fetch_timeout_seconds] elapsed.
+    ///
+    /// A distinct type so a caller can tell "the origin is slow or gone" from "this route
+    /// does not exist", which otherwise both surface as a generic failure.
+    class TimedOut : public std::runtime_error {
+    public:
+        explicit TimedOut(const std::string& what) : std::runtime_error(what) {}
+    };
+
+    /**
+     * Bound how long an action may spend fetching tiles. 0, the default, is no limit.
+     *
+     * Normally set from `mjolnir.tile_url_timeout` in the config rather than called; this
+     * exists for a caller that needs to change it after construction.
+     *
+     * This is not the same as an HTTP timeout and does not replace one. A platform client
+     * caps a single request; one route attempts tile after tile, each paying its own
+     * timeout in turn, so the operation is unbounded even when every request is bounded.
+     * Measured against a dead origin on an iOS simulator with a 10 s per-request cap: 170
+     * seconds, during which the app looks frozen.
+     *
+     * Checked between tile fetches, so the granularity is one request. A fetch already in
+     * flight when the deadline passes is not cancelled -- it finishes or hits its own
+     * timeout, and the next one throws. Connect and DNS stalls are the platform client's
+     * business; this bounds how many of them an action can accumulate.
+     */
+    void set_tile_fetch_timeout_seconds(double seconds);
 
     /**
      * Compute a route between the given locations. This is Valhalla's `route`
