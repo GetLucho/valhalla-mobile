@@ -254,6 +254,7 @@ ValhallaActor::ValhallaActor(const std::string& config_path,
     interrupt = [this]() {
       // Cancellation first: a user who pressed stop should not wait out the deadline.
       if (cancelled->load(std::memory_order_relaxed)) {
+        deadline_fired.store(true, std::memory_order_relaxed);
         throw Cancelled("the action was cancelled");
       }
       const auto limit = fetch_deadline.load(std::memory_order_relaxed);
@@ -261,6 +262,7 @@ ValhallaActor::ValhallaActor(const std::string& config_path,
         return;
       }
       if (std::chrono::steady_clock::now().time_since_epoch().count() > limit) {
+        deadline_fired.store(true, std::memory_order_relaxed);
         throw TimedOut("gave up fetching tiles after " +
                        std::to_string(tile_fetch_timeout_seconds.load(std::memory_order_relaxed)) +
                        " seconds");
@@ -321,7 +323,14 @@ bool ValhallaActor::ensure_tile_cached(uint32_t level, uint32_t id) {
     // the path a route would have used, so there is one cache, one naming rule, one gzip
     // decision and one rebuild check rather than two of each.
     const valhalla::baldr::GraphId graphid(id, level, 0);
-    return static_cast<bool>(graph_reader->GetGraphTile(graphid));
+    const bool cached = static_cast<bool>(graph_reader->GetGraphTile(graphid));
+    // Same reason as with_deadline: the interrupt throws and valhalla swallows it, so a tile
+    // abandoned on the deadline would otherwise look identical to one the origin does not
+    // have -- and for a prefetch those mean opposite things.
+    if (deadline_fired.load(std::memory_order_relaxed)) {
+        throw TimedOut(deadline_message());
+    }
+    return cached;
 }
 
 void ValhallaActor::set_tile_fetch_timeout_seconds(double seconds) {
@@ -330,10 +339,35 @@ void ValhallaActor::set_tile_fetch_timeout_seconds(double seconds) {
 
 std::string ValhallaActor::with_deadline(const std::function<std::string()>& action) {
     arm_deadline();
-    return action();
+    // Checked after, not relied on to propagate. The interrupt throws, valhalla catches it
+    // somewhere in the fetch path, and loki answers 171 "No suitable edges near location" --
+    // indistinguishable from a genuinely unroutable address. A caller needs to tell "the
+    // origin is gone" from "this route does not exist", so the flag is what says so.
+    std::string answer;
+    try {
+        answer = action();
+    } catch (...) {
+        if (deadline_fired.load(std::memory_order_relaxed)) {
+            throw TimedOut(deadline_message());
+        }
+        throw;
+    }
+    if (deadline_fired.load(std::memory_order_relaxed)) {
+        throw TimedOut(deadline_message());
+    }
+    return answer;
+}
+
+std::string ValhallaActor::deadline_message() const {
+    if (cancelled->load(std::memory_order_relaxed)) {
+        return "the action was cancelled";
+    }
+    return "gave up fetching tiles after " +
+           std::to_string(tile_fetch_timeout_seconds.load(std::memory_order_relaxed)) + " seconds";
 }
 
 void ValhallaActor::arm_deadline() {
+    deadline_fired.store(false, std::memory_order_relaxed);
     const auto seconds = tile_fetch_timeout_seconds.load(std::memory_order_relaxed);
     if (seconds <= 0) {
         fetch_deadline.store(0, std::memory_order_relaxed);

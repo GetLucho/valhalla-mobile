@@ -94,6 +94,14 @@ private:
     std::atomic<std::chrono::steady_clock::rep> fetch_deadline{0};
     /// Installed on the GraphReader once, and held here because it stores the pointer.
     std::function<void()> interrupt;
+    /// Set by the interrupt when it fires, cleared when an action is armed.
+    ///
+    /// The exception the interrupt throws does not reach the caller: somewhere in the fetch
+    /// path valhalla catches it, and loki then reports "No suitable edges near location"
+    /// (error 171) -- the same answer a genuinely unroutable address gives. Recording that
+    /// the deadline fired is how an action that gave up is told apart from one that looked
+    /// and found nothing, without archaeology through internals that are not ours.
+    std::atomic<bool> deadline_fired{false};
     /// Set by [cancel], cleared by [resume]. Read from the fetching thread.
     std::atomic<bool> owned_cancelled{false};
     /// Either &owned_cancelled or the caller's flag. Never null after construction.
@@ -104,6 +112,9 @@ private:
 
     /// Arm the deadline without running anything, for callers that are not string actions.
     void arm_deadline();
+
+    /// Why the action gave up, for the exception message.
+    std::string deadline_message() const;
 
 public:
     /**
