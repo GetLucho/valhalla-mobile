@@ -95,7 +95,9 @@ private:
     /// Installed on the GraphReader once, and held here because it stores the pointer.
     std::function<void()> interrupt;
     /// Set by [cancel], cleared by [resume]. Read from the fetching thread.
-    std::atomic<bool> cancelled{false};
+    std::atomic<bool> owned_cancelled{false};
+    /// Either &owned_cancelled or the caller's flag. Never null after construction.
+    std::atomic<bool>* cancelled = &owned_cancelled;
 
     /// Arm the deadline for an action about to run, then run it.
     std::string with_deadline(const std::function<std::string()>& action);
@@ -104,7 +106,17 @@ private:
     void arm_deadline();
 
 public:
-    ValhallaActor(const std::string& config_path, ValhallaMobileHttpClient* http_client = nullptr);
+    /**
+     * @param cancel_flag  optional, and NOT owned. When given, [cancel] and [resume] set it
+     *                     and the interrupt reads it, so a caller can stop a running action
+     *                     without touching this object -- which matters because every other
+     *                     method holds a lock for its duration, and an actor being freed
+     *                     concurrently would otherwise leave cancel reading a dangling
+     *                     pointer. It must outlive this actor.
+     */
+    ValhallaActor(const std::string& config_path,
+                  ValhallaMobileHttpClient* http_client = nullptr,
+                  std::atomic<bool>* cancel_flag = nullptr);
 
     /// Raised when an action gave up because [set_tile_fetch_timeout_seconds] elapsed.
     ///

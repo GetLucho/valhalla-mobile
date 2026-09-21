@@ -15,6 +15,14 @@ internal interface ValhallaActorProviding : Closeable {
   fun height(request: String): String
 
   fun matrix(request: String): String
+
+  fun tilesCovering(latitude: Double, longitude: Double): String
+
+  fun ensureTileCached(level: Int, tileId: Int): Boolean
+
+  fun cancel()
+
+  fun resume()
 }
 
 /**
@@ -85,6 +93,48 @@ internal class ValhallaActor(
    * source and every target. Same assumptions as [route].
    */
   override fun matrix(request: String): String = perform(request, valhallaKotlin::matrix)
+
+  /**
+   * The tiles covering a coordinate, one per hierarchy level, as JSON.
+   *
+   * From `TileHierarchy::levels()` and `GraphTile::FileSuffix`, so a consumer needs no copy of
+   * the grid arithmetic. Empty for a coordinate that is not on the planet.
+   */
+  override fun tilesCovering(latitude: Double, longitude: Double): String =
+      synchronized(lock) {
+        check(handle != 0L) { "the Valhalla actor is closed" }
+        String(valhallaKotlin.tilesCovering(handle, latitude, longitude), Charsets.UTF_8)
+      }
+
+  /**
+   * Ensure one tile is in `mjolnir.tile_dir`, fetching it through valhalla if it is not.
+   *
+   * False for a tile the origin does not have, which is normal coverage rather than a failure,
+   * and false when the fetch was cancelled or hit the deadline.
+   */
+  override fun ensureTileCached(level: Int, tileId: Int): Boolean =
+      synchronized(lock) {
+        check(handle != 0L) { "the Valhalla actor is closed" }
+        valhallaKotlin.ensureTileCached(handle, level, tileId)
+      }
+
+  /**
+   * Ask the action running now to stop at its next tile fetch. Sticky until [resume].
+   *
+   * Deliberately NOT synchronized: every other method holds [lock] for the duration of its
+   * native call, so taking it here would mean waiting for the very thing being cancelled. The
+   * flag lives on the native handle, which outlives any one actor, and the handle field is
+   * only ever zeroed by [close] -- a cancel racing a close sets a flag nobody reads.
+   */
+  override fun cancel() {
+    val current = handle
+    if (current != 0L) valhallaKotlin.setCancelled(current, true)
+  }
+
+  override fun resume() {
+    val current = handle
+    if (current != 0L) valhallaKotlin.setCancelled(current, false)
+  }
 
   /**
    * Release the native actor. Safe to call more than once; later calls do nothing.

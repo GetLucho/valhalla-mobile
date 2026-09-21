@@ -340,6 +340,34 @@ internal constructor(
    *
    * Any request attempted after this throws [IllegalStateException].
    */
+  /**
+   * The tiles covering a coordinate, one per hierarchy level, as a JSON array of
+   * `{"level": Int, "id": Int, "path": String}`.
+   *
+   * `path` is what `mjolnir.tile_url`'s `{tilePath}` is replaced with, and it always carries
+   * the uncompressed suffix: with `tile_url_gz` on the CACHED file is `.gph.gz`, but
+   * `CacheTileURL` builds the fetch name from the plain suffix, so the two differ on purpose.
+   */
+  fun tilesCovering(latitude: Double, longitude: Double): String =
+      valhallaActor.tilesCovering(latitude, longitude)
+
+  /**
+   * Ensure one tile is in `mjolnir.tile_dir`, fetching it through Valhalla if it is not.
+   *
+   * @return false for a tile the origin does not have, which is normal coverage rather than a
+   *   failure -- two of the sixteen level-2 tiles over Lake and Porter counties are Lake
+   *   Michigan. Also false when the fetch was cancelled or hit the deadline; the caller
+   *   re-reads the cache to find out what landed.
+   */
+  fun ensureTileCached(level: Int, tileId: Int): Boolean =
+      valhallaActor.ensureTileCached(level, tileId)
+
+  /** Ask the action running now to stop at its next tile fetch. Sticky until [resume]. */
+  fun cancel() = valhallaActor.cancel()
+
+  /** Clear a previous [cancel] so further actions can run. */
+  fun resume() = valhallaActor.resume()
+
   override fun close() {
     valhallaActor.close()
   }

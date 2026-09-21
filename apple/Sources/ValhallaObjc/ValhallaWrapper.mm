@@ -1,3 +1,5 @@
+#include <atomic>
+
 #import "ValhallaWrapper.h"
 
 #import <include/main.h>
@@ -246,7 +248,12 @@ NSString* PerformAction(ActorAction action,
     try {
         // Create the network interface implementation for iOS
         ValhallaMobileHttpClient* httpClient = new ValhallaMobileHttpClientImpl();
-        _actor = create_valhalla_actor(path.c_str(), httpClient);
+        // Owned here, not by the actor, and freed in dealloc rather than close: `cancel`
+        // has to reach a RUNNING action without taking the monitor or reading _actor, and
+        // close() nulls _actor and frees the actor underneath it.
+        _cancelFlag = new std::atomic<bool>(false);
+        _actor = create_valhalla_actor(path.c_str(), httpClient,
+                                       static_cast<std::atomic<bool>*>(_cancelFlag));
     } catch (NSException *exception) {
         *error = [[NSError alloc] initWithDomain:exception.name code:0 userInfo:@{
             NSUnderlyingErrorKey: exception,
@@ -310,9 +317,67 @@ NSString* PerformAction(ActorAction action,
     }
 }
 
+- (NSArray<NSDictionary*>*)tilesCoveringLatitude:(double)latitude longitude:(double)longitude
+{
+    @synchronized(self) {
+        if (_actor == nullptr) {
+            return @[];
+        }
+        auto* actor = static_cast<ValhallaActor*>(_actor);
+        NSMutableArray<NSDictionary*>* covering = [NSMutableArray array];
+        try {
+            for (const auto& ref : actor->tiles_covering(latitude, longitude)) {
+                [covering addObject:@{
+                    @"level" : @(ref.level),
+                    @"id" : @(ref.id),
+                    @"path" : [NSString stringWithUTF8String:ref.path.c_str()],
+                }];
+            }
+        } catch (...) {
+            return @[];
+        }
+        return covering;
+    }
+}
+
+- (BOOL)ensureTileCachedAtLevel:(uint32_t)level tileId:(uint32_t)tileId
+{
+    @synchronized(self) {
+        if (_actor == nullptr) {
+            return NO;
+        }
+        auto* actor = static_cast<ValhallaActor*>(_actor);
+        try {
+            return actor->ensure_tile_cached(level, tileId) ? YES : NO;
+        } catch (...) {
+            // A deadline, a cancel, or an origin that refused. The caller re-reads the
+            // cache to find out what actually landed, so a throw here is a NO, not a crash.
+            return NO;
+        }
+    }
+}
+
+- (void)cancel
+{
+    // NOT @synchronized, and it does not touch _actor. The whole point is to reach an action
+    // that is RUNNING, and every other method holds the monitor for its duration -- so taking
+    // it here would mean waiting for the thing being cancelled. Reading _actor without the
+    // monitor would race with close(), which nulls it and frees the actor, so the flag lives
+    // here instead and outlives the actor by construction.
+    static_cast<std::atomic<bool>*>(_cancelFlag)->store(true, std::memory_order_relaxed);
+}
+
+- (void)resume
+{
+    static_cast<std::atomic<bool>*>(_cancelFlag)->store(false, std::memory_order_relaxed);
+}
+
 - (void) dealloc
 {
     [self close];
+    // After close, so nothing can still be reading it.
+    delete static_cast<std::atomic<bool>*>(_cancelFlag);
+    _cancelFlag = nullptr;
 }
 
 @end

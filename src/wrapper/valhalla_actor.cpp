@@ -190,7 +190,12 @@ template <typename Action> std::string run_on_deep_stack(Action&& action) {
 
 } // namespace
 
-ValhallaActor::ValhallaActor(const std::string& config_path, ValhallaMobileHttpClient* http_client) {
+ValhallaActor::ValhallaActor(const std::string& config_path,
+                             ValhallaMobileHttpClient* http_client,
+                             std::atomic<bool>* cancel_flag) {
+    if (cancel_flag != nullptr) {
+      cancelled = cancel_flag;
+    }
     // Take ownership of the client immediately so it is freed on any early
     // return or exception below, and regardless of whether a getter is attached.
     std::unique_ptr<ValhallaMobileHttpClient> http_client_owned(http_client);
@@ -248,7 +253,7 @@ ValhallaActor::ValhallaActor(const std::string& config_path, ValhallaMobileHttpC
     // and returns -1 for exactly this, and TileGetterWrapper::get lets it propagate.
     interrupt = [this]() {
       // Cancellation first: a user who pressed stop should not wait out the deadline.
-      if (cancelled.load(std::memory_order_relaxed)) {
+      if (cancelled->load(std::memory_order_relaxed)) {
         throw Cancelled("the action was cancelled");
       }
       const auto limit = fetch_deadline.load(std::memory_order_relaxed);
@@ -274,11 +279,11 @@ ValhallaActor::ValhallaActor(const std::string& config_path, ValhallaMobileHttpC
 }
 
 void ValhallaActor::cancel() {
-    cancelled.store(true, std::memory_order_relaxed);
+    cancelled->store(true, std::memory_order_relaxed);
 }
 
 void ValhallaActor::resume() {
-    cancelled.store(false, std::memory_order_relaxed);
+    cancelled->store(false, std::memory_order_relaxed);
 }
 
 std::vector<ValhallaActor::TileRef> ValhallaActor::tiles_covering(double latitude,
