@@ -118,7 +118,13 @@ tasks.named("preBuild") {
 
 mavenPublishing {
     publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL)
-    signAllPublications()
+    // Signatures are a Maven Central requirement, not a publishing one. Signing
+    // unconditionally made `publishToMavenLocal` fail with "no configured
+    // signatory" on any machine without a GPG key -- so a contributor could not
+    // install the library locally to test a change against a real consumer.
+    if (project.findProperty("valhalla.skipSigning") != "true") {
+        signAllPublications()
+    }
 
     if (project.version.toString() === "unspecified") {
         throw IllegalArgumentException("Version must be specified")
