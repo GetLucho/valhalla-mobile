@@ -27,6 +27,21 @@ public:
      */
     virtual valhalla::baldr::tile_getter_t::HEAD_response_t 
     head(const std::string& url, valhalla::baldr::tile_getter_t::header_mask_t header_mask) = 0;
+
+    /**
+     * Tells the client whether tiles are fetched gzip-compressed, from
+     * `mjolnir.tile_url_gz`.
+     *
+     * Valhalla inflates tiles itself and decides from that same setting whether to,
+     * so the client has to deliver exactly the bytes on the wire: compressed when
+     * this is true, uncompressed when it is false. Both platform clients otherwise
+     * negotiate an encoding of their own and hand back something inflated, which
+     * makes `tile_url_gz: true` fail on every tile.
+     *
+     * Called once, before the first request. Not pure: a client that only ever
+     * serves uncompressed tiles needs no implementation.
+     */
+    virtual void set_gzipped(bool /*gzipped*/) {}
 };
 
 /**

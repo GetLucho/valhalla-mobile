@@ -38,9 +38,11 @@ internal class ValhallaHttpClient(
    * @param url the tile URL, already filled in by valhalla.
    * @param rangeOffset first byte to request. Only used when [rangeSize] is positive.
    * @param rangeSize how many bytes to request; `0` asks for the whole resource.
+   * @param gzip whether the tileset is served gzip-compressed, from `mjolnir.tile_url_gz`.
+   *   Passed per request rather than held here, so this object stays stateless.
    */
-  fun get(url: String, rangeOffset: Long, rangeSize: Long): ValhallaHttpResponse =
-      perform(url, method = "GET", headerMask = 0) { connection ->
+  fun get(url: String, rangeOffset: Long, rangeSize: Long, gzip: Boolean): ValhallaHttpResponse =
+      perform(url, method = "GET", headerMask = 0, gzip = gzip) { connection ->
         if (rangeSize > 0) {
           // Inclusive on both ends, so the last byte is offset + size - 1.
           connection.setRequestProperty(
@@ -62,6 +64,7 @@ internal class ValhallaHttpClient(
       url: String,
       method: String,
       headerMask: Int,
+      gzip: Boolean = false,
       configure: (HttpURLConnection) -> Unit,
   ): ValhallaHttpResponse {
     var connection: HttpURLConnection? = null
@@ -71,10 +74,16 @@ internal class ValhallaHttpClient(
             requestMethod = method
             connectTimeout = connectTimeoutMillis
             readTimeout = readTimeoutMillis
-            // HttpURLConnection otherwise offers gzip on its own and silently inflates what comes
-            // back. Valhalla decides for itself whether tiles are gzipped, from `tile_url_gz`, and
-            // inflates them itself — so it has to receive exactly the bytes on the wire.
-            setRequestProperty("Accept-Encoding", "identity")
+            // Always set explicitly, and never left to HttpURLConnection: left alone it offers
+            // gzip on its own and silently inflates what comes back. Valhalla decides whether
+            // tiles are gzipped, from `tile_url_gz`, and inflates them itself — so it has to
+            // receive exactly the bytes on the wire, compressed or not.
+            //
+            // Asking for identity when the tileset IS gzipped was the bug this replaces: the
+            // wrapper reported gzipped() true while this handed back raw tile bytes, and every
+            // tile failed to decompress. Against a remote tileset it also cost roughly 2.7x the
+            // bytes on the wire, which on a phone is somebody's cellular data.
+            setRequestProperty("Accept-Encoding", if (gzip) "gzip" else "identity")
             configure(this)
           }
 

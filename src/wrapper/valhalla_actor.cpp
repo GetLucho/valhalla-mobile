@@ -180,8 +180,15 @@ ValhallaActor::ValhallaActor(const std::string& config_path, ValhallaMobileHttpC
     // scope exit (loose-tile mode needs no getter).
     std::unique_ptr<TileGetterWrapper> tile_getter;
     if (!mjolnir_config.get<std::string>("tile_url", std::string()).empty()) {
-      tile_getter = std::make_unique<TileGetterWrapper>(
-          std::move(http_client_owned), mjolnir_config.get<bool>("tile_url_gz", false));
+      // The client has to be told before it is handed over: it decides its own
+      // Accept-Encoding, and TileGetterWrapper::gzipped() promises Valhalla that
+      // whatever comes back matches. Told once here, so the two cannot disagree.
+      const bool tile_url_gz = mjolnir_config.get<bool>("tile_url_gz", false);
+      if (http_client_owned) {
+        http_client_owned->set_gzipped(tile_url_gz);
+      }
+      tile_getter =
+          std::make_unique<TileGetterWrapper>(std::move(http_client_owned), tile_url_gz);
     }
     graph_reader = std::make_unique<valhalla::baldr::GraphReader>(
       mjolnir_config, std::move(tile_getter)

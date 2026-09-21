@@ -62,6 +62,10 @@ NSData* PerformSynchronously(NSURLRequest* request,
  */
 class ValhallaMobileHttpClientImpl : public ValhallaMobileHttpClient {
 public:
+    void set_gzipped(bool gzipped) override {
+        this->gzipped = gzipped;
+    }
+
     valhalla::baldr::tile_getter_t::GET_response_t 
     get(const std::string& url, uint64_t range_offset = 0, uint64_t range_size = 0) override {
         valhalla::baldr::tile_getter_t::GET_response_t response;
@@ -79,7 +83,19 @@ public:
             NSMutableURLRequest* request = [NSMutableURLRequest requestWithURL:nsurl];
             request.HTTPMethod = @"GET";
             request.timeoutInterval = 10;
-            
+
+            // Always set explicitly, and never left to NSURLSession: left alone it adds an
+            // Accept-Encoding of its own and inflates the response transparently. Valhalla
+            // decides whether tiles are gzipped, from `tile_url_gz`, and inflates them itself
+            // — so it has to receive exactly the bytes on the wire, compressed or not.
+            //
+            // Leaving it unset when the tileset IS gzipped was the bug this replaces: the
+            // wrapper reported gzipped() true while NSURLSession handed back inflated bytes,
+            // and every tile failed to decompress. Setting the header also opts this request
+            // out of the transparent inflation, which is what makes the compressed case work.
+            [request setValue:(gzipped ? @"gzip" : @"identity")
+                forHTTPHeaderField:@"Accept-Encoding"];
+
             // Set range header if needed
             if (range_size > 0) {
                 NSString* rangeHeader = [NSString stringWithFormat:@"bytes=%llu-%llu", 
@@ -115,6 +131,11 @@ public:
         return response;
     }
     
+private:
+    /// Set once from mjolnir.tile_url_gz before the first request; see set_gzipped.
+    bool gzipped = false;
+
+public:
     valhalla::baldr::tile_getter_t::HEAD_response_t 
     head(const std::string& url, valhalla::baldr::tile_getter_t::header_mask_t header_mask) override {
         valhalla::baldr::tile_getter_t::HEAD_response_t response;
