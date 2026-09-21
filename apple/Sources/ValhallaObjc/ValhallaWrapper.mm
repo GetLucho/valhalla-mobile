@@ -115,7 +115,30 @@ public:
             }
             
             response.http_code_ = httpResponse.statusCode;
-            
+
+            // Content negotiation is a request, not a guarantee, and valhalla cannot tell a
+            // wrongly-encoded body from a corrupt one: it inflates according to `tile_url_gz`
+            // and reports a decompression failure whatever actually arrived. Checking here
+            // turns a confusing tile error into an ordinary failed fetch.
+            //
+            // Not hypothetical. A CDN in front of one tileset answers `zstd` to a client that
+            // offers `gzip, br, zstd`, and plain `identity` to one offering only `br` -- so an
+            // edited Accept-Encoding, or a proxy that rewrites it, silently produces bytes
+            // valhalla will try to gunzip.
+            //
+            // Whole-resource fetches only: a range request is served from the identity
+            // representation, so its Content-Encoding says nothing about what was asked for.
+            if (range_size == 0) {
+                NSString* encoding =
+                    [httpResponse valueForHTTPHeaderField:@"Content-Encoding"] ?: @"identity";
+                NSString* expected = gzipped ? @"gzip" : @"identity";
+                if ([encoding caseInsensitiveCompare:expected] != NSOrderedSame) {
+                    response.status_ =
+                        valhalla::baldr::tile_getter_t::status_code_t::FAILURE;
+                    return response;
+                }
+            }
+
             if (httpResponse.statusCode >= 200 && httpResponse.statusCode < 300) {
                 // Copy data to response bytes
                 if (data) {

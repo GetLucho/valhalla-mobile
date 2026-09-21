@@ -42,7 +42,15 @@ internal class ValhallaHttpClient(
    *   Passed per request rather than held here, so this object stays stateless.
    */
   fun get(url: String, rangeOffset: Long, rangeSize: Long, gzip: Boolean): ValhallaHttpResponse =
-      perform(url, method = "GET", headerMask = 0, gzip = gzip) { connection ->
+      perform(
+          url,
+          method = "GET",
+          headerMask = 0,
+          gzip = gzip,
+          // Whole-resource fetches only. A range request is served from the identity
+          // representation, so its Content-Encoding says nothing about what was asked for.
+          expectedEncoding = if (rangeSize > 0L) null else if (gzip) "gzip" else "identity",
+      ) { connection ->
         if (rangeSize > 0) {
           // Inclusive on both ends, so the last byte is offset + size - 1.
           connection.setRequestProperty(
@@ -65,6 +73,7 @@ internal class ValhallaHttpClient(
       method: String,
       headerMask: Int,
       gzip: Boolean = false,
+      expectedEncoding: String? = null,
       configure: (HttpURLConnection) -> Unit,
   ): ValhallaHttpResponse {
     var connection: HttpURLConnection? = null
@@ -100,6 +109,23 @@ internal class ValhallaHttpClient(
           } else {
             0L
           }
+
+      // Content negotiation is a request, not a guarantee, and valhalla cannot tell a
+      // wrongly-encoded body from a corrupt one: it inflates according to `tile_url_gz` and
+      // reports a decompression failure whatever actually arrived. Checking here turns a
+      // confusing tile error into an ordinary failed fetch.
+      //
+      // Not hypothetical. A CDN in front of this tileset answers `zstd` to a client that
+      // offers `gzip, br, zstd`, and plain `identity` to one that offers only `br` -- so an
+      // edited Accept-Encoding, or a proxy that rewrites it, silently produces bytes valhalla
+      // will try to gunzip.
+      if (expectedEncoding != null) {
+        val encoding =
+            connection.getHeaderField("Content-Encoding")?.trim()?.lowercase() ?: "identity"
+        if (encoding != expectedEncoding) {
+          return ValhallaHttpResponse.failure(httpCode)
+        }
+      }
 
       val body = if (method == "GET") connection.inputStream.use { it.readBytes() } else null
 
