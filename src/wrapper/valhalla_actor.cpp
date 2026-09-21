@@ -252,6 +252,12 @@ ValhallaActor::ValhallaActor(const std::string& config_path, ValhallaMobileHttpC
                        " seconds");
       }
     };
+    // Also set here, for any path that reaches the reader without going through a worker.
+    // It is NOT enough on its own: loki_worker_t::set_interrupt and thor_worker_t::set_interrupt
+    // both call reader->SetInterrupt(interrupt), and every action calls them with whatever that
+    // action was given -- which is nullptr unless one is passed. So an interrupt installed once
+    // at construction is overwritten with null by the first action that runs, which is why each
+    // action below passes it explicitly.
     graph_reader->SetInterrupt(&interrupt);
 
     // Setup the actor
@@ -279,30 +285,30 @@ std::string ValhallaActor::with_deadline(const std::function<std::string()>& act
 
 std::string ValhallaActor::route(const std::string& request) {
     return with_deadline([&]() {
-        return run_on_deep_stack([&]() { return actor->route(request); });
+        return run_on_deep_stack([&]() { return actor->route(request, &interrupt); });
     });
 }
 
 std::string ValhallaActor::trace_route(const std::string& request) {
     return with_deadline([&]() {
-        return run_on_deep_stack([&]() { return actor->trace_route(request); });
+        return run_on_deep_stack([&]() { return actor->trace_route(request, &interrupt); });
     });
 }
 
 std::string ValhallaActor::trace_attributes(const std::string& request) {
     return with_deadline([&]() {
-        return run_on_deep_stack([&]() { return actor->trace_attributes(request); });
+        return run_on_deep_stack([&]() { return actor->trace_attributes(request, &interrupt); });
     });
 }
 
 std::string ValhallaActor::height(const std::string& request) {
     return with_deadline([&]() {
-        return run_on_deep_stack([&]() { return actor->height(request); });
+        return run_on_deep_stack([&]() { return actor->height(request, &interrupt); });
     });
 }
 
 std::string ValhallaActor::matrix(const std::string& request) {
     return with_deadline([&]() {
-        return run_on_deep_stack([&]() { return actor->matrix(request); });
+        return run_on_deep_stack([&]() { return actor->matrix(request, &interrupt); });
     });
 }
