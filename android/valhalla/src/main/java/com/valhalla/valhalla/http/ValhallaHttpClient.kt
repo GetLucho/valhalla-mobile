@@ -47,9 +47,10 @@ internal class ValhallaHttpClient(
           method = "GET",
           headerMask = 0,
           gzip = gzip,
-          // Whole-resource fetches only. A range request is served from the identity
-          // representation, so its Content-Encoding says nothing about what was asked for.
-          expectedEncoding = if (rangeSize > 0L) null else if (gzip) "gzip" else "identity",
+          // Only when we asked for an encoding. With the header unset the platform
+          // negotiates and inflates, so Content-Encoding then describes what crossed the
+          // wire rather than what is in hand. A range request says nothing either way.
+          expectedEncoding = if (gzip && rangeSize == 0L) "gzip" else null,
       ) { connection ->
         if (rangeSize > 0) {
           // Inclusive on both ends, so the last byte is offset + size - 1.
@@ -83,16 +84,22 @@ internal class ValhallaHttpClient(
             requestMethod = method
             connectTimeout = connectTimeoutMillis
             readTimeout = readTimeoutMillis
-            // Always set explicitly, and never left to HttpURLConnection: left alone it offers
-            // gzip on its own and silently inflates what comes back. Valhalla decides whether
-            // tiles are gzipped, from `tile_url_gz`, and inflates them itself — so it has to
-            // receive exactly the bytes on the wire, compressed or not.
+            // Set only when valhalla wants the compressed bytes. HttpURLConnection inflates
+            // transparently exactly when it chose the encoding itself, so:
             //
-            // Asking for identity when the tileset IS gzipped was the bug this replaces: the
-            // wrapper reported gzipped() true while this handed back raw tile bytes, and every
-            // tile failed to decompress. Against a remote tileset it also cost roughly 2.7x the
-            // bytes on the wire, which on a phone is somebody's cellular data.
-            setRequestProperty("Accept-Encoding", if (gzip) "gzip" else "identity")
+            //  * gzip on  -> we set it, and the body arrives compressed, which is what
+            //    `tile_url_gz: true` promises valhalla.
+            //  * gzip off -> we leave it alone, and HttpURLConnection negotiates gzip and
+            //    inflates for us. Compressed on the wire, uncompressed in hand.
+            //
+            // The previous code sent `identity` in the second case, which is where the real
+            // cost was: an uncompressed tile is roughly 2.7x the bytes, and on a phone that
+            // is somebody's cellular data. iOS never had that problem because NSURLSession
+            // always negotiates gzip -- and always inflates, which is why it cannot serve
+            // the first case at all.
+            if (gzip) {
+              setRequestProperty("Accept-Encoding", "gzip")
+            }
             configure(this)
           }
 

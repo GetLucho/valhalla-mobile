@@ -223,6 +223,13 @@ public:
         this->gzipped = gzipped;
     }
 
+    /// Yes. HttpURLConnection only inflates transparently when it chose the encoding
+    /// itself; once the caller sets Accept-Encoding, the body is handed over untouched.
+    /// That is the opposite of NSURLSession, which is why this is a per-client answer.
+    bool delivers_compressed_bytes() const override {
+        return true;
+    }
+
     valhalla::baldr::tile_getter_t::GET_response_t
     get(const std::string& url, uint64_t range_offset = 0, uint64_t range_size = 0) override {
         valhalla::baldr::tile_getter_t::GET_response_t response;

@@ -66,6 +66,18 @@ public:
         this->gzipped = gzipped;
     }
 
+    /// Never. NSURLSession inflates every gzip response and offers no way to opt out --
+    /// setting Accept-Encoding explicitly does not change it, and the response still
+    /// carries `Content-Encoding: gzip`, so the body looks compressed by every header and
+    /// is not. Measured against a live CDN: with and without the header, the body came back
+    /// 20,491,672 bytes with no gzip magic number.
+    ///
+    /// Tiles still cross the wire compressed, because NSURLSession negotiates that itself;
+    /// they are simply handed over inflated, so valhalla must be told they are not gzipped.
+    bool delivers_compressed_bytes() const override {
+        return false;
+    }
+
     valhalla::baldr::tile_getter_t::GET_response_t 
     get(const std::string& url, uint64_t range_offset = 0, uint64_t range_size = 0) override {
         valhalla::baldr::tile_getter_t::GET_response_t response;
@@ -84,17 +96,11 @@ public:
             request.HTTPMethod = @"GET";
             request.timeoutInterval = 10;
 
-            // Always set explicitly, and never left to NSURLSession: left alone it adds an
-            // Accept-Encoding of its own and inflates the response transparently. Valhalla
-            // decides whether tiles are gzipped, from `tile_url_gz`, and inflates them itself
-            // — so it has to receive exactly the bytes on the wire, compressed or not.
-            //
-            // Leaving it unset when the tileset IS gzipped was the bug this replaces: the
-            // wrapper reported gzipped() true while NSURLSession handed back inflated bytes,
-            // and every tile failed to decompress. Setting the header also opts this request
-            // out of the transparent inflation, which is what makes the compressed case work.
-            [request setValue:(gzipped ? @"gzip" : @"identity")
-                forHTTPHeaderField:@"Accept-Encoding"];
+            // Deliberately unset. NSURLSession negotiates gzip on its own and inflates the
+            // response, which is what we want here -- the tile crosses the wire compressed
+            // and arrives ready to use. Setting the header does NOT opt out of the
+            // inflation, so there is nothing to gain by setting it and a false impression
+            // to give by doing so. See delivers_compressed_bytes.
 
             // Set range header if needed
             if (range_size > 0) {
@@ -115,29 +121,6 @@ public:
             }
             
             response.http_code_ = httpResponse.statusCode;
-
-            // Content negotiation is a request, not a guarantee, and valhalla cannot tell a
-            // wrongly-encoded body from a corrupt one: it inflates according to `tile_url_gz`
-            // and reports a decompression failure whatever actually arrived. Checking here
-            // turns a confusing tile error into an ordinary failed fetch.
-            //
-            // Not hypothetical. A CDN in front of one tileset answers `zstd` to a client that
-            // offers `gzip, br, zstd`, and plain `identity` to one offering only `br` -- so an
-            // edited Accept-Encoding, or a proxy that rewrites it, silently produces bytes
-            // valhalla will try to gunzip.
-            //
-            // Whole-resource fetches only: a range request is served from the identity
-            // representation, so its Content-Encoding says nothing about what was asked for.
-            if (range_size == 0) {
-                NSString* encoding =
-                    [httpResponse valueForHTTPHeaderField:@"Content-Encoding"] ?: @"identity";
-                NSString* expected = gzipped ? @"gzip" : @"identity";
-                if ([encoding caseInsensitiveCompare:expected] != NSOrderedSame) {
-                    response.status_ =
-                        valhalla::baldr::tile_getter_t::status_code_t::FAILURE;
-                    return response;
-                }
-            }
 
             if (httpResponse.statusCode >= 200 && httpResponse.statusCode < 300) {
                 // Copy data to response bytes

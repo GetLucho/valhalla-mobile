@@ -184,11 +184,17 @@ ValhallaActor::ValhallaActor(const std::string& config_path, ValhallaMobileHttpC
       // Accept-Encoding, and TileGetterWrapper::gzipped() promises Valhalla that
       // whatever comes back matches. Told once here, so the two cannot disagree.
       const bool tile_url_gz = mjolnir_config.get<bool>("tile_url_gz", false);
+      bool gzipped = false;
       if (http_client_owned) {
         http_client_owned->set_gzipped(tile_url_gz);
+        // What the client can actually deliver, not what was asked for. See
+        // ValhallaMobileHttpClient::delivers_compressed_bytes: reporting the
+        // request rather than the capability is a SIGSEGV on iOS, because
+        // valhalla inflates a body the platform already inflated and then
+        // dereferences the null that DecompressTile returns.
+        gzipped = tile_url_gz && http_client_owned->delivers_compressed_bytes();
       }
-      tile_getter =
-          std::make_unique<TileGetterWrapper>(std::move(http_client_owned), tile_url_gz);
+      tile_getter = std::make_unique<TileGetterWrapper>(std::move(http_client_owned), gzipped);
     }
     graph_reader = std::make_unique<valhalla::baldr::GraphReader>(
       mjolnir_config, std::move(tile_getter)

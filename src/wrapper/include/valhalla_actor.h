@@ -42,6 +42,27 @@ public:
      * serves uncompressed tiles needs no implementation.
      */
     virtual void set_gzipped(bool /*gzipped*/) {}
+
+    /**
+     * Whether this client hands back the compressed bytes when asked to.
+     *
+     * Asking is not the same as being able. NSURLSession decompresses every gzip
+     * response transparently and offers no way to opt out -- setting
+     * Accept-Encoding yourself does not change it, and the response still reports
+     * `Content-Encoding: gzip`, so the body looks compressed by every header and
+     * is not. Valhalla then inflates an already-inflated tile, DecompressTile
+     * returns null, and CacheTileURL dereferences it: the process dies with
+     * SIGSEGV rather than failing the fetch.
+     *
+     * So the wrapper asks the client what it actually delivers and reports THAT
+     * to valhalla, instead of reporting what the config asked for. A client that
+     * cannot keep bytes compressed makes `tile_url_gz: true` behave as false --
+     * the tiles still cross the wire compressed, because the platform negotiated
+     * that itself; they are simply stored uncompressed.
+     */
+    virtual bool delivers_compressed_bytes() const {
+        return false;
+    }
 };
 
 /**
