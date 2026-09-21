@@ -267,7 +267,10 @@ class ValhallaActorTest {
         "{\"sources\":[{\"lat\":45.843812,\"lon\":-123.768205}],\"targets\":[{\"lat\":45.869701,\"lon\":-123.766121}],\"costing\":\"auto\"}"
     val response = valhalla.matrix(request)
 
-    assertEquals(response, "{\"code\":171,\"message\":\"No suitable edges near location\"}")
+    // Since valhalla 3.9.0 a matrix reports this as unconnected regions; a route still says 171.
+    assertEquals(
+        response,
+        "{\"code\":170,\"message\":\"Locations are in unconnected regions. Go check/edit the map at osm.org\"}")
   }
 
   /** A character outside the BMP has to survive both crossings of the bridge. */
