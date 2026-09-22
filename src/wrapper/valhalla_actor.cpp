@@ -255,7 +255,7 @@ ValhallaActor::ValhallaActor(const std::string& config_path,
       // Cancellation first: a user who pressed stop should not wait out the deadline.
       if (cancelled->load(std::memory_order_relaxed)) {
         deadline_fired.store(true, std::memory_order_relaxed);
-        throw Cancelled("the action was cancelled");
+        throw Cancelled(kCancelledMessage);
       }
       const auto limit = fetch_deadline.load(std::memory_order_relaxed);
       if (limit == 0) {
@@ -263,9 +263,7 @@ ValhallaActor::ValhallaActor(const std::string& config_path,
       }
       if (std::chrono::steady_clock::now().time_since_epoch().count() > limit) {
         deadline_fired.store(true, std::memory_order_relaxed);
-        throw TimedOut("gave up fetching tiles after " +
-                       std::to_string(tile_fetch_timeout_seconds.load(std::memory_order_relaxed)) +
-                       " seconds");
+        throw TimedOut(kTimedOutMessage);
       }
     };
     // Also set here, for any path that reaches the reader without going through a worker.
@@ -359,11 +357,14 @@ std::string ValhallaActor::with_deadline(const std::function<std::string()>& act
 }
 
 std::string ValhallaActor::deadline_message() const {
+    // Fixed strings, and no numbers in them. A caller has to tell these two apart from a
+    // genuine routing failure, and the only signal that survives the trip to Swift and Kotlin
+    // is the text -- so it has to be stable, and std::to_string(double) writes "15.000000".
+    // The caller configured the timeout, so it already knows the number.
     if (cancelled->load(std::memory_order_relaxed)) {
-        return "the action was cancelled";
+        return kCancelledMessage;
     }
-    return "gave up fetching tiles after " +
-           std::to_string(tile_fetch_timeout_seconds.load(std::memory_order_relaxed)) + " seconds";
+    return kTimedOutMessage;
 }
 
 void ValhallaActor::arm_deadline() {

@@ -129,6 +129,16 @@ public:
                   ValhallaMobileHttpClient* http_client = nullptr,
                   std::atomic<bool>* cancel_flag = nullptr);
 
+    /// The exact text [TimedOut] carries when the deadline elapsed.
+    ///
+    /// Fixed, and part of the contract: it is the only signal that survives the trip out to
+    /// Swift and Kotlin, so a caller matches on it to tell "the origin is gone" from "this
+    /// route does not exist".
+    static constexpr const char* kTimedOutMessage = "valhalla-mobile: tile fetch deadline";
+
+    /// The exact text [TimedOut] carries when [cancel] was called.
+    static constexpr const char* kCancelledMessage = "valhalla-mobile: cancelled";
+
     /// Raised when an action gave up because [set_tile_fetch_timeout_seconds] elapsed.
     ///
     /// A distinct type so a caller can tell "the origin is slow or gone" from "this route
