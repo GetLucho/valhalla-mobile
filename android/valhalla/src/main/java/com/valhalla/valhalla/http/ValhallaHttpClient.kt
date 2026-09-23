@@ -38,9 +38,11 @@ internal class ValhallaHttpClient(
    * @param url the tile URL, already filled in by valhalla.
    * @param rangeOffset first byte to request. Only used when [rangeSize] is positive.
    * @param rangeSize how many bytes to request; `0` asks for the whole resource.
+   * @param gzip whether the tileset is served gzip-compressed, from `mjolnir.tile_url_gz`.
+   *   Passed per request rather than held here, so this object stays stateless.
    */
-  fun get(url: String, rangeOffset: Long, rangeSize: Long): ValhallaHttpResponse =
-      perform(url, method = "GET", headerMask = 0) { connection ->
+  fun get(url: String, rangeOffset: Long, rangeSize: Long, gzip: Boolean): ValhallaHttpResponse =
+      perform(url, method = "GET", headerMask = 0, gzip = gzip, rangeSize = rangeSize) { connection ->
         if (rangeSize > 0) {
           // Inclusive on both ends, so the last byte is offset + size - 1.
           connection.setRequestProperty(
@@ -62,8 +64,16 @@ internal class ValhallaHttpClient(
       url: String,
       method: String,
       headerMask: Int,
+      gzip: Boolean = false,
+      rangeSize: Long = 0,
       configure: (HttpURLConnection) -> Unit,
   ): ValhallaHttpResponse {
+    // One decision, not two. Ask for the compressed bytes only when valhalla wants them and
+    // this is a whole-resource fetch, and check the answer in exactly the same case. A range
+    // response is served from the identity representation, so asking for gzip there produces
+    // a body no one can verify -- and if a proxy compresses it anyway, valhalla inflates one
+    // layer, gets null on the second, and dereferences it.
+    val wantsCompressed = gzip && rangeSize == 0L
     var connection: HttpURLConnection? = null
     return try {
       connection =
@@ -71,10 +81,22 @@ internal class ValhallaHttpClient(
             requestMethod = method
             connectTimeout = connectTimeoutMillis
             readTimeout = readTimeoutMillis
-            // HttpURLConnection otherwise offers gzip on its own and silently inflates what comes
-            // back. Valhalla decides for itself whether tiles are gzipped, from `tile_url_gz`, and
-            // inflates them itself — so it has to receive exactly the bytes on the wire.
-            setRequestProperty("Accept-Encoding", "identity")
+            // Set only when valhalla wants the compressed bytes. HttpURLConnection inflates
+            // transparently exactly when it chose the encoding itself, so:
+            //
+            //  * gzip on  -> we set it, and the body arrives compressed, which is what
+            //    `tile_url_gz: true` promises valhalla.
+            //  * gzip off -> we leave it alone, and HttpURLConnection negotiates gzip and
+            //    inflates for us. Compressed on the wire, uncompressed in hand.
+            //
+            // The previous code sent `identity` in the second case, which is where the real
+            // cost was: an uncompressed tile is roughly 2.7x the bytes, and on a phone that
+            // is somebody's cellular data. iOS never had that problem because NSURLSession
+            // always negotiates gzip -- and always inflates, which is why it cannot serve
+            // the first case at all.
+            if (wantsCompressed) {
+              setRequestProperty("Accept-Encoding", "gzip")
+            }
             configure(this)
           }
 
@@ -91,6 +113,30 @@ internal class ValhallaHttpClient(
           } else {
             0L
           }
+
+      // Content negotiation is a request, not a guarantee, and valhalla cannot tell a
+      // wrongly-encoded body from a corrupt one: it inflates according to `tile_url_gz` and
+      // reports a decompression failure whatever actually arrived. Checking here turns a
+      // confusing tile error into an ordinary failed fetch.
+      //
+      // Not hypothetical. A CDN in front of this tileset answers `zstd` to a client that
+      // offers `gzip, br, zstd`, and plain `identity` to one that offers only `br` -- so an
+      // edited Accept-Encoding, or a proxy that rewrites it, silently produces bytes valhalla
+      // will try to gunzip.
+      if (wantsCompressed) {
+        val encoding =
+            connection.getHeaderField("Content-Encoding")?.trim()?.lowercase() ?: "identity"
+        if (encoding != "gzip") {
+          // Said out loud, because the alternative is silence. Valhalla reports a failed fetch
+          // as a missing tile, so without this an operator pointing `tile_url_gz: true` at a
+          // server that does not compress sees "failed to download tile" for every tile and
+          // nothing to suggest the encoding is why.
+          System.err.println(
+              "valhalla-mobile: asked $url for gzip, server sent '$encoding'. " +
+                  "Set tile_url_gz false, or serve the tiles gzip-compressed.")
+          return ValhallaHttpResponse.failure(httpCode)
+        }
+      }
 
       val body = if (method == "GET") connection.inputStream.use { it.readBytes() } else null
 

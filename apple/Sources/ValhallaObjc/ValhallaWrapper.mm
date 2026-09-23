@@ -62,6 +62,18 @@ NSData* PerformSynchronously(NSURLRequest* request,
  */
 class ValhallaMobileHttpClientImpl : public ValhallaMobileHttpClient {
 public:
+    /// Never. NSURLSession inflates every gzip response and offers no way to opt out --
+    /// setting Accept-Encoding explicitly does not change it, and the response still
+    /// carries `Content-Encoding: gzip`, so the body looks compressed by every header and
+    /// is not. Measured against a live CDN: with and without the header, the body came back
+    /// 20,491,672 bytes with no gzip magic number.
+    ///
+    /// Tiles still cross the wire compressed, because NSURLSession negotiates that itself;
+    /// they are simply handed over inflated, so valhalla must be told they are not gzipped.
+    bool delivers_compressed_bytes() const override {
+        return false;
+    }
+
     valhalla::baldr::tile_getter_t::GET_response_t 
     get(const std::string& url, uint64_t range_offset = 0, uint64_t range_size = 0) override {
         valhalla::baldr::tile_getter_t::GET_response_t response;
@@ -79,7 +91,13 @@ public:
             NSMutableURLRequest* request = [NSMutableURLRequest requestWithURL:nsurl];
             request.HTTPMethod = @"GET";
             request.timeoutInterval = 10;
-            
+
+            // Deliberately unset. NSURLSession negotiates gzip on its own and inflates the
+            // response, which is what we want here -- the tile crosses the wire compressed
+            // and arrives ready to use. Setting the header does NOT opt out of the
+            // inflation, so there is nothing to gain by setting it and a false impression
+            // to give by doing so. See delivers_compressed_bytes.
+
             // Set range header if needed
             if (range_size > 0) {
                 NSString* rangeHeader = [NSString stringWithFormat:@"bytes=%llu-%llu", 
@@ -99,7 +117,7 @@ public:
             }
             
             response.http_code_ = httpResponse.statusCode;
-            
+
             if (httpResponse.statusCode >= 200 && httpResponse.statusCode < 300) {
                 // Copy data to response bytes
                 if (data) {

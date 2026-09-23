@@ -180,8 +180,24 @@ ValhallaActor::ValhallaActor(const std::string& config_path, ValhallaMobileHttpC
     // scope exit (loose-tile mode needs no getter).
     std::unique_ptr<TileGetterWrapper> tile_getter;
     if (!mjolnir_config.get<std::string>("tile_url", std::string()).empty()) {
-      tile_getter = std::make_unique<TileGetterWrapper>(
-          std::move(http_client_owned), mjolnir_config.get<bool>("tile_url_gz", false));
+      // The client has to be told before it is handed over: it decides its own
+      // Accept-Encoding, and TileGetterWrapper::gzipped() promises Valhalla that
+      // whatever comes back matches. Told once here, so the two cannot disagree.
+      const bool tile_url_gz = mjolnir_config.get<bool>("tile_url_gz", false);
+      bool gzipped = false;
+      if (http_client_owned) {
+        // What the client can actually deliver, not what was asked for. See
+        // ValhallaMobileHttpClient::delivers_compressed_bytes: reporting the
+        // request rather than the capability is a SIGSEGV on iOS, because
+        // valhalla inflates a body the platform already inflated and then
+        // dereferences the null that DecompressTile returns.
+        gzipped = tile_url_gz && http_client_owned->delivers_compressed_bytes();
+        // The client is told what valhalla is told, not what the config asked for. Telling it
+        // the raw flag would let a client request compressed bytes while valhalla was told to
+        // expect plain ones, and CacheTileURL would memcpy a gzip stream into a tile header.
+        http_client_owned->set_gzipped(gzipped);
+      }
+      tile_getter = std::make_unique<TileGetterWrapper>(std::move(http_client_owned), gzipped);
     }
     graph_reader = std::make_unique<valhalla::baldr::GraphReader>(
       mjolnir_config, std::move(tile_getter)

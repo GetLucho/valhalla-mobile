@@ -129,7 +129,10 @@ object ValhallaConfigFactory {
      *
      * @param tilesUrl the URL pattern tiles are fetched from.
      * @param tilesDir absolute path of the directory downloaded tiles are stored in.
-     * @param tilesAreGzFiles whether the server serves gzip-compressed tiles.
+     * @param tilesAreGzFiles whether the server serves gzip-compressed tiles. Android only: on
+     *   iOS this is ignored, because NSURLSession inflates every response and cannot hand the
+     *   compressed bytes on. Tiles are fetched compressed on both platforms either way; the flag
+     *   only decides whether they are still compressed when valhalla receives them.
      */
     fun usingTileUrl(
         tilesUrl: String,

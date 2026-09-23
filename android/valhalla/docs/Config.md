@@ -39,6 +39,11 @@ val config = ValhallaConfigFactory.usingTileUrl(
 Valhalla fills the `{tilePath}` portion in with the tile it wants, and `tilesAreGzFiles = true`
 tells it the server serves gzip-compressed tiles.
 
+`tilesAreGzFiles` is Android only. On iOS it is ignored: NSURLSession inflates every response
+and offers no way to opt out, so valhalla can never be handed the compressed bytes. Tiles cross
+the wire compressed on both platforms regardless — the flag only decides whether they are still
+compressed by the time valhalla sees them.
+
 Fetching goes through `java.net.HttpURLConnection`, so this adds no networking dependency to your
 app. Three things to know:
 

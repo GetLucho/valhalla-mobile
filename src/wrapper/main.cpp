@@ -219,6 +219,17 @@ public:
     explicit JniHttpClient(const JniHttpBinding* binding) : binding(binding) {
     }
 
+    void set_gzipped(bool gzipped) override {
+        this->gzipped = gzipped;
+    }
+
+    /// Yes. HttpURLConnection only inflates transparently when it chose the encoding
+    /// itself; once the caller sets Accept-Encoding, the body is handed over untouched.
+    /// That is the opposite of NSURLSession, which is why this is a per-client answer.
+    bool delivers_compressed_bytes() const override {
+        return true;
+    }
+
     valhalla::baldr::tile_getter_t::GET_response_t
     get(const std::string& url, uint64_t range_offset = 0, uint64_t range_size = 0) override {
         valhalla::baldr::tile_getter_t::GET_response_t response;
@@ -240,9 +251,12 @@ public:
             return response;
         }
 
+        // Passed per request rather than held on the Kotlin object, which is
+        // otherwise stateless and shared by every JniHttpClient.
         jobject result = env.get()->CallObjectMethod(binding->client, binding->get, j_url,
                                                      static_cast<jlong>(range_offset),
-                                                     static_cast<jlong>(range_size));
+                                                     static_cast<jlong>(range_size),
+                                                     gzipped ? JNI_TRUE : JNI_FALSE);
         if (!completed(env.get(), result)) {
             return response;
         }
@@ -317,6 +331,8 @@ private:
     }
 
     const JniHttpBinding* binding;
+    /// Set once from mjolnir.tile_url_gz before the first request; see set_gzipped.
+    bool gzipped = false;
 };
 
 /**
@@ -355,7 +371,7 @@ public:
 
         binding.get =
             env->GetMethodID(client_class, "get",
-                             "(Ljava/lang/String;JJ)Lcom/valhalla/valhalla/http/ValhallaHttpResponse;");
+                             "(Ljava/lang/String;JJZ)Lcom/valhalla/valhalla/http/ValhallaHttpResponse;");
         binding.head =
             env->GetMethodID(client_class, "head",
                              "(Ljava/lang/String;I)Lcom/valhalla/valhalla/http/ValhallaHttpResponse;");

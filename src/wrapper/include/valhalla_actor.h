@@ -27,6 +27,42 @@ public:
      */
     virtual valhalla::baldr::tile_getter_t::HEAD_response_t 
     head(const std::string& url, valhalla::baldr::tile_getter_t::header_mask_t header_mask) = 0;
+
+    /**
+     * Tells the client whether tiles are fetched gzip-compressed, from
+     * `mjolnir.tile_url_gz`.
+     *
+     * Valhalla inflates tiles itself and decides from that same setting whether to,
+     * so the client has to deliver exactly the bytes on the wire: compressed when
+     * this is true, uncompressed when it is false. Both platform clients otherwise
+     * negotiate an encoding of their own and hand back something inflated, which
+     * makes `tile_url_gz: true` fail on every tile.
+     *
+     * Called once, before the first request. Not pure: a client that only ever
+     * serves uncompressed tiles needs no implementation.
+     */
+    virtual void set_gzipped(bool /*gzipped*/) {}
+
+    /**
+     * Whether this client hands back the compressed bytes when asked to.
+     *
+     * Asking is not the same as being able. NSURLSession decompresses every gzip
+     * response transparently and offers no way to opt out -- setting
+     * Accept-Encoding yourself does not change it, and the response still reports
+     * `Content-Encoding: gzip`, so the body looks compressed by every header and
+     * is not. Valhalla then inflates an already-inflated tile, DecompressTile
+     * returns null, and CacheTileURL dereferences it: the process dies with
+     * SIGSEGV rather than failing the fetch.
+     *
+     * So the wrapper asks the client what it actually delivers and reports THAT
+     * to valhalla, instead of reporting what the config asked for. A client that
+     * cannot keep bytes compressed makes `tile_url_gz: true` behave as false --
+     * the tiles still cross the wire compressed, because the platform negotiated
+     * that itself; they are simply stored uncompressed.
+     */
+    virtual bool delivers_compressed_bytes() const {
+        return false;
+    }
 };
 
 /**
