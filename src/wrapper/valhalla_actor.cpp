@@ -12,7 +12,6 @@
 
 #include <cmath>
 #include <pthread.h>
-#include <zlib.h>
 
 #include <boost/property_tree/ptree.hpp>
 #include <valhalla/tyr/actor.h>

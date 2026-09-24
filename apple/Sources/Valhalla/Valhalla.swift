@@ -289,10 +289,11 @@ public final class Valhalla: ValhallaProviding {
     ///
     /// - Returns: `false` for a tile the origin does not have, which is normal coverage rather
     ///   than a failure -- two of the sixteen level-2 tiles over Lake and Porter counties are
-    ///   Lake Michigan. Also `false` when the fetch was cancelled or hit the deadline; the
-    ///   caller re-reads the cache to find out what landed.
+    ///   Lake Michigan.
+    /// - Throws: ``ValhallaError/valhallaError(_:_:)`` when the fetch was cancelled, hit the
+    ///   deadline, or failed.
     public func ensureTileCached(level: UInt32, id: UInt32) throws -> Bool {
-        try withActor { $0.ensureTileCached(level: level, id: id) }
+        try checkForError(try withActor { $0.ensureTileCached(level: level, id: id) }) == "true"
     }
 
     /// Asks the action running now to stop at its next tile fetch. Sticky until ``resume()``.

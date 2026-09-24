@@ -18,7 +18,7 @@ internal interface ValhallaActorProviding : Closeable {
 
   fun tilesCovering(latitude: Double, longitude: Double): String
 
-  fun ensureTileCached(level: Int, tileId: Int): Boolean
+  fun ensureTileCached(level: Int, tileId: Int): String
 
   fun cancel()
 
@@ -109,13 +109,14 @@ internal class ValhallaActor(
   /**
    * Ensure one tile is in `mjolnir.tile_dir`, fetching it through valhalla if it is not.
    *
-   * False for a tile the origin does not have, which is normal coverage rather than a failure,
-   * and false when the fetch was cancelled or hit the deadline.
+   * `true` or `false` as JSON, or the error envelope when the fetch was cancelled, hit the
+   * deadline, or failed. False is a tile the origin does not have, which is normal coverage
+   * rather than a failure.
    */
-  override fun ensureTileCached(level: Int, tileId: Int): Boolean =
+  override fun ensureTileCached(level: Int, tileId: Int): String =
       synchronized(lock) {
         check(handle != 0L) { "the Valhalla actor is closed" }
-        valhallaKotlin.ensureTileCached(handle, level, tileId)
+        String(valhallaKotlin.ensureTileCached(handle, level, tileId), Charsets.UTF_8)
       }
 
   /**

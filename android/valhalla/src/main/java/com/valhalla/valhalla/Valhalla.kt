@@ -356,11 +356,11 @@ internal constructor(
    *
    * @return false for a tile the origin does not have, which is normal coverage rather than a
    *   failure -- two of the sixteen level-2 tiles over Lake and Porter counties are Lake
-   *   Michigan. Also false when the fetch was cancelled or hit the deadline; the caller
-   *   re-reads the cache to find out what landed.
+   *   Michigan.
+   * @throws ValhallaException.Internal when the fetch was cancelled, hit the deadline, or failed.
    */
   fun ensureTileCached(level: Int, tileId: Int): Boolean =
-      valhallaActor.ensureTileCached(level, tileId)
+      checkForError(valhallaActor.ensureTileCached(level, tileId)) == "true"
 
   /** Ask the action running now to stop at its next tile fetch. Sticky until [resume]. */
   fun cancel() = valhallaActor.cancel()

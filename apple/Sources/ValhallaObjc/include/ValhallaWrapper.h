@@ -51,9 +51,11 @@
 
 /// Ensures one tile is in `mjolnir.tile_dir`, fetching it through valhalla if it is not.
 ///
-/// NO for a tile the origin does not have, which is normal coverage rather than a failure:
-/// two of the sixteen level-2 tiles over Lake and Porter counties are Lake Michigan.
-- (BOOL)ensureTileCachedAtLevel:(uint32_t)level tileId:(uint32_t)tileId
+/// `true` or `false` as JSON, or the error envelope when the fetch was cancelled, hit the
+/// deadline, or failed. `false` is a tile the origin does not have, which is normal coverage
+/// rather than a failure: two of the sixteen level-2 tiles over Lake and Porter counties are
+/// Lake Michigan.
+- (NSString*)ensureTileCachedAtLevel:(uint32_t)level tileId:(uint32_t)tileId
     NS_SWIFT_NAME(ensureTileCached(level:id:));
 
 /// Asks the action running now to stop at its next tile fetch. Sticky until `resume`.

@@ -455,33 +455,27 @@ std::string copy_bytes(JNIEnv* env, jbyteArray array) {
 }
 
 /**
- * Shared body of every JNI action: read the request, run one action against the
- * handle's actor, and hand the response back.
+ * Runs one action against the handle's actor and hands the response back.
  *
- * Requests and responses cross as UTF-8 bytes, not Java strings: JNI strings are
- * Modified UTF-8, which cannot carry a character outside the BMP or a binary
- * `format: pbf` response. Kotlin does the decoding. A zero handle means Kotlin
- * called after close, which its own guard should have caught.
+ * Responses cross as UTF-8 bytes, not Java strings: JNI strings are Modified UTF-8,
+ * which cannot carry a character outside the BMP or a binary `format: pbf` response.
+ * Kotlin does the decoding. A zero handle means Kotlin called after close, which its
+ * own guard should have caught.
  */
-jbyteArray run_jni_action(JNIEnv *env,
-                          jlong handle,
-                          jbyteArray jRequest,
-                          ActorAction action,
-                          const char* action_name) {
+template <typename Action>
+jbyteArray run_on_actor(JNIEnv *env, jlong handle, const char* action_name, Action&& action) {
     std::string result;
     if (handle == 0) {
         result = error_json(-1, std::string("the actor is closed, cannot run ") + action_name);
     } else {
         auto* actor_handle = reinterpret_cast<ActorHandle*>(handle);
         result = invoke_action(action_name, [&]() {
-            // Copied inside invoke_action so a bad_alloc becomes the envelope.
-            const std::string request = copy_bytes(env, jRequest);
             // Normally already built by createActor; this is the retry path.
             if (!actor_handle->actor) {
                 actor_handle->actor = std::make_unique<ValhallaActor>(
                     actor_handle->config_path, actor_handle->new_http_client());
             }
-            return ((*actor_handle->actor).*action)(request);
+            return action(*actor_handle->actor);
         });
     }
 
@@ -492,6 +486,19 @@ jbyteArray run_jni_action(JNIEnv *env,
                                 reinterpret_cast<const jbyte*>(result.data()));
     }
     return response;
+}
+
+/// Shared body of every JNI action that takes a request, which also crosses as UTF-8 bytes.
+jbyteArray run_jni_action(JNIEnv *env,
+                          jlong handle,
+                          jbyteArray jRequest,
+                          ActorAction action,
+                          const char* action_name) {
+    return run_on_actor(env, handle, action_name, [&](ValhallaActor& actor) {
+        // Copied inside invoke_action so a bad_alloc becomes the envelope.
+        const std::string request = copy_bytes(env, jRequest);
+        return (actor.*action)(request);
+    });
 }
 
 } // namespace
@@ -582,7 +589,7 @@ Java_com_valhalla_valhalla_ValhallaKotlin_tilesCovering(JNIEnv *env,
 }
 
 extern "C"
-JNIEXPORT jboolean
+JNIEXPORT jbyteArray
 
 JNICALL
 Java_com_valhalla_valhalla_ValhallaKotlin_ensureTileCached(JNIEnv *env,
@@ -590,21 +597,14 @@ Java_com_valhalla_valhalla_ValhallaKotlin_ensureTileCached(JNIEnv *env,
                                                           jlong handle,
                                                           jint level,
                                                           jint tileId) {
-    auto* actor_handle = reinterpret_cast<ActorHandle*>(handle);
-    if (actor_handle == nullptr || !actor_handle->actor) {
-        return JNI_FALSE;
-    }
-    try {
-        return actor_handle->actor->ensure_tile_cached(static_cast<uint32_t>(level),
-                                                      static_cast<uint32_t>(tileId))
-                   ? JNI_TRUE
-                   : JNI_FALSE;
-    } catch (...) {
-        // A deadline, a cancel, or an origin that refused. The caller re-reads the cache to
-        // find out what landed, so a throw here is a false rather than an exception crossing
-        // the JNI boundary.
-        return JNI_FALSE;
-    }
+    // `true` or `false`, or the error envelope, so a deadline or a cancel is not mistaken
+    // for a tile the origin does not have.
+    return run_on_actor(env, handle, "ensure_tile_cached", [&](ValhallaActor& actor) {
+        return std::string(actor.ensure_tile_cached(static_cast<uint32_t>(level),
+                                                    static_cast<uint32_t>(tileId))
+                               ? "true"
+                               : "false");
+    });
 }
 
 extern "C"
@@ -728,6 +728,14 @@ std::string height(const char *request, void* actor) {
 std::string matrix(const char *request, void* actor) {
     return invoke_action("matrix", [&]() {
         return ((ValhallaActor*) actor)->matrix(request);
+    });
+}
+
+std::string ensure_tile_cached(uint32_t level, uint32_t tile_id, void* actor) {
+    return invoke_action("ensure_tile_cached", [&]() {
+        return std::string(((ValhallaActor*) actor)->ensure_tile_cached(level, tile_id)
+                               ? "true"
+                               : "false");
     });
 }
 #endif
