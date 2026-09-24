@@ -135,10 +135,13 @@ build_tiles() {
 create_tar_archive() {
     log_info "Creating tar archive of tiles..."
 
-    # Create tar archive (without compression for faster access)
-    cd "$WORK_DIR/valhalla_tiles"
-    tar -cf "$WORK_DIR/valhalla_tiles.tar" .
-    cd - > /dev/null
+    # valhalla's own extract, with index.bin first, so the tar also works as a remote tile_url.
+    docker run --rm \
+        -v "$WORK_DIR:/data" \
+        "$VALHALLA_IMAGE" \
+        valhalla_build_extract \
+        -i '{"mjolnir":{"tile_dir":"/data/valhalla_tiles","tile_extract":"/data/valhalla_tiles.tar"}}' \
+        -O
 
     log_info "Tar archive created: $WORK_DIR/valhalla_tiles.tar"
 }
