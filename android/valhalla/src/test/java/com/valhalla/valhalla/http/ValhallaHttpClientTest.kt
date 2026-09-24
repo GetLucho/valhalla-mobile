@@ -12,13 +12,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
-/**
- * JVM tests against the JDK's HTTP server. [ValhallaHttpClient] only uses `HttpURLConnection`, so
- * no device or native library is needed.
- *
- * The JDK's HttpURLConnection never negotiates or inflates gzip on its own, unlike Android's.
- * `ValhallaTileUrlTest` covers Android's behavior on a device.
- */
+/** Against the JDK's HttpURLConnection, which never negotiates gzip on its own. */
 class ValhallaHttpClientTest {
 
   private lateinit var server: HttpServer
@@ -73,7 +67,6 @@ class ValhallaHttpClientTest {
     assertArrayEquals(gzip(payload), response.body)
   }
 
-  /** The wrapper compresses a plain body, so this is not a failure. */
   @Test
   fun returnsPlainBodyWhenServerIgnoresGzip() {
     forcedEncoding = "identity"

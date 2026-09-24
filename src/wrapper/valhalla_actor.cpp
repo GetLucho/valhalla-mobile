@@ -1,10 +1,8 @@
 #include <algorithm>
 #include <cstddef>
-#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <exception>
-#include <limits>
 #include <memory>
 #include <string>
 #include <system_error>
@@ -30,126 +28,60 @@
 
 namespace {
 
-/// zlib level for tiles that arrive uncompressed.
-/// Level 1 is the fastest:
-/// on a 37 MB tile (Apple M4) it took 275 ms for 39.5% of the raw size,
-/// against 1.2 s for 35.5% at level 6.
 constexpr int kTileGzipLevel = 1;
 
-constexpr size_t kTileHeaderSize = sizeof(valhalla::baldr::GraphTileHeader);
-
-/// A raw tile can't start with the gzip magic:
-/// its first byte holds the hierarchy level in the low 3 bits,
-/// and 0x1f would mean level 7.
-bool has_gzip_magic(const char* bytes, size_t size) {
-    return size >= 2 && static_cast<unsigned char>(bytes[0]) == 0x1f &&
+// A raw tile can't start with the gzip magic: 0x1f would mean hierarchy level 7.
+bool has_gzip_magic(const std::vector<char>& bytes) {
+    return bytes.size() >= 2 && static_cast<unsigned char>(bytes[0]) == 0x1f &&
            static_cast<unsigned char>(bytes[1]) == 0x8b;
 }
 
-/// The size a tile's header records for the whole tile.
-/// Valhalla refuses a tile whose size doesn't match it exactly.
-uint64_t recorded_tile_size(const char* header) {
-    valhalla::baldr::GraphTileHeader parsed;
-    std::memcpy(&parsed, header, sizeof(parsed));
-    return parsed.end_offset();
+// Valhalla refuses a tile whose size isn't the one its header records.
+bool is_whole_tile(const std::vector<char>& bytes) {
+    valhalla::baldr::GraphTileHeader header;
+    if (bytes.size() < sizeof(header)) {
+        return false;
+    }
+    std::memcpy(&header, bytes.data(), sizeof(header));
+    return header.end_offset() == bytes.size();
 }
 
-/// Whether a raw body is one whole tile.
-bool is_raw_tile(const std::vector<char>& bytes) {
-    return bytes.size() >= kTileHeaderSize && recorded_tile_size(bytes.data()) == bytes.size();
+// Grows `out` as valhalla's inflate or deflate fills it, and trims it once they finish.
+void grow(z_stream& s, std::vector<char>& out, size_t step) {
+    const size_t size = out.size();
+    if (s.total_out < size) {
+        out.resize(s.total_out);
+        return;
+    }
+    out.resize(size + step);
+    s.next_out = reinterpret_cast<Bytef*>(out.data() + size);
+    s.avail_out = static_cast<uInt>(step);
 }
 
-/// Frees a zlib inflate stream on every way out, including an allocation that throws.
-struct InflateEnd {
-    z_stream& stream;
-    ~InflateEnd() {
-        inflateEnd(&stream);
-    }
-};
-
-/**
- * Inflates a gzip body and checks that it holds exactly one whole tile.
- *
- * The whole stream is read, not just the header,
- * so a truncated or corrupt tail fails here,
- * instead of in valhalla, which dereferences the null that DecompressTile returns.
- * zlib checks the CRC and length in the gzip trailer.
- *
- * @param plain  receives the tile when given; otherwise the output is discarded.
- */
-bool inflate_tile(const std::vector<char>& gzip, std::vector<char>* plain) {
-    if (gzip.size() > std::numeric_limits<uInt>::max()) {
-        return false;
-    }
-    z_stream stream{};
-    if (inflateInit2(&stream, MAX_WBITS + 16) != Z_OK) {
-        return false;
-    }
-    InflateEnd end{stream};
-    stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(gzip.data()));
-    stream.avail_in = static_cast<uInt>(gzip.size());
-
-    // The header first, because it records how big the whole tile is.
-    char header[kTileHeaderSize];
-    stream.next_out = reinterpret_cast<Bytef*>(header);
-    stream.avail_out = sizeof(header);
-    int status = Z_OK;
-    while (stream.avail_out > 0 && status == Z_OK) {
-        status = ::inflate(&stream, Z_NO_FLUSH);
-    }
-    // A second gzip layer would pass valhalla's inflate and then fail as a tile.
-    if (stream.avail_out > 0 || has_gzip_magic(header, sizeof(header))) {
-        return false;
-    }
-    const uint64_t size = recorded_tile_size(header);
-    if (size < kTileHeaderSize || size > std::numeric_limits<uInt>::max()) {
-        return false;
-    }
-
-    if (plain) {
-        plain->resize(size);
-        std::memcpy(plain->data(), header, kTileHeaderSize);
-        stream.next_out = reinterpret_cast<Bytef*>(plain->data()) + kTileHeaderSize;
-        stream.avail_out = static_cast<uInt>(size - kTileHeaderSize);
-        if (status == Z_OK) {
-            status = ::inflate(&stream, Z_FINISH);
+bool gunzip(const std::vector<char>& gzip, std::vector<char>& out) {
+    bool fed = false;
+    // Fed once, so a truncated stream fails instead of reading itself again.
+    auto src = [&](z_stream& s) {
+        if (!fed) {
+            s.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(gzip.data()));
+            s.avail_in = static_cast<uInt>(gzip.size());
+            fed = true;
         }
-    } else {
-        std::vector<char> scratch(64 * 1024);
-        while (status == Z_OK) {
-            stream.next_out = reinterpret_cast<Bytef*>(scratch.data());
-            stream.avail_out = static_cast<uInt>(scratch.size());
-            status = ::inflate(&stream, Z_NO_FLUSH);
-        }
-    }
-    // Anything after the gzip trailer is not part of the tile.
-    return status == Z_STREAM_END && stream.avail_in == 0 && stream.total_out == size;
+    };
+    auto dst = [&](z_stream& s) {
+        grow(s, out, std::max<size_t>(gzip.size() * 3, 64 * 1024));
+        return Z_NO_FLUSH;
+    };
+    return valhalla::baldr::inflate(src, dst);
 }
 
-/// Gzips `plain` into `out`, using valhalla's deflate, which cleans up if an allocation throws.
 bool gzip_tile(const std::vector<char>& plain, std::vector<char>& out) {
-    if (plain.size() > std::numeric_limits<uInt>::max()) {
-        return false;
-    }
-    out.clear();
-    auto src = [&plain](z_stream& s) -> int {
+    auto src = [&](z_stream& s) {
         s.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(plain.data()));
         s.avail_in = static_cast<uInt>(plain.size());
         return Z_FINISH;
     };
-    // Called when the output is full, and once more at the end to trim it.
-    // Tiles usually compress to under half their size.
-    auto dst = [&plain, &out](z_stream& s) {
-        const size_t size = out.size();
-        if (s.total_out < size) {
-            out.resize(s.total_out);
-            return;
-        }
-        const size_t step = std::max<size_t>(plain.size() / 2, 64 * 1024);
-        out.resize(size + step);
-        s.next_out = reinterpret_cast<Bytef*>(out.data() + size);
-        s.avail_out = static_cast<uInt>(step);
-    };
+    auto dst = [&](z_stream& s) { grow(s, out, std::max<size_t>(plain.size() / 2, 64 * 1024)); };
     return valhalla::baldr::deflate(src, dst, kTileGzipLevel, true);
 }
 
@@ -199,9 +131,7 @@ public:
       result.status_ = tile_getter_t::status_code_t::FAILURE;
       return result;
     }
-    // Ranges are slices of a remote tar and are passed through as is,
-    // as long as they are exactly the slice asked for:
-    // a server that ignores Range sends the whole tar instead.
+    // A range is a slice of a remote tar, passed through as is if it's the size asked for.
     if (range_size > 0) {
       result = http_client->get(url, range_offset, range_size, false);
       if (result.status_ == tile_getter_t::status_code_t::SUCCESS &&
@@ -238,37 +168,30 @@ public:
   }
 
 private:
-  /**
-   * Checks a downloaded tile and converts it to the form valhalla stores:
-   * gzip when is_gzipped, raw otherwise.
-   * Valhalla caches whatever it is handed,
-   * so a body that isn't one whole tile has to be rejected here,
-   * or it fails on every later load.
-   */
+  // Valhalla caches whatever it's handed, so anything but one whole tile is rejected here.
   bool to_stored_form(const std::string& url, std::vector<char>& bytes) const {
-    const char* problem = nullptr;
-    if (has_gzip_magic(bytes.data(), bytes.size())) {
-      // The server sent gzip and the client kept it, or the server hosts .gz files.
+    bool ok = true;
+    if (has_gzip_magic(bytes)) {
       std::vector<char> plain;
-      if (!inflate_tile(bytes, is_gzipped ? nullptr : &plain)) {
-        problem = "is not one whole gzip-compressed tile";
-      } else if (!is_gzipped) {
+      ok = gunzip(bytes, plain) && is_whole_tile(plain);
+      if (ok && !is_gzipped) {
+        // Valhalla keeps this vector as the tile.
+        plain.shrink_to_fit();
         bytes.swap(plain);
       }
-    } else if (!is_raw_tile(bytes)) {
-      problem = "is not one whole tile";
+    } else if (!is_whole_tile(bytes)) {
+      ok = false;
     } else if (is_gzipped) {
       std::vector<char> gzip;
-      if (gzip_tile(bytes, gzip)) {
+      ok = gzip_tile(bytes, gzip);
+      if (ok) {
         bytes.swap(gzip);
-      } else {
-        problem = "could not be gzip-compressed";
       }
     }
-    if (problem) {
-      printf("[ValhallaActor] tile %s %s\n", url.c_str(), problem);
+    if (!ok) {
+      printf("[ValhallaActor] tile %s is not one whole tile\n", url.c_str());
     }
-    return problem == nullptr;
+    return ok;
   }
 
   bool is_gzipped;
@@ -407,10 +330,7 @@ ValhallaActor::ValhallaActor(const std::string& config_path,
     std::unique_ptr<TileGetterWrapper> tile_getter;
     const auto tile_url = mjolnir_config.get<std::string>("tile_url", std::string());
     if (!tile_url.empty()) {
-      // A remote tar is read in byte ranges that are passed through as is,
-      // so gzip only applies to URLs that name each tile.
-      // Without a tile_dir nothing is stored,
-      // so compressing would only be undone straight away.
+      // Only tiles named in the URL and stored in a tile_dir are kept gzipped.
       const bool gzipped =
           mjolnir_config.get<bool>("tile_url_gz", false) &&
           tile_url.find(valhalla::baldr::GraphTile::kTilePathPattern) != std::string::npos &&

@@ -27,7 +27,7 @@ import java.util.concurrent.TimeUnit
  *   thread with a `tile_url` config therefore trips `NetworkOnMainThreadException`, which is
  *   reported here as a failed fetch.
  */
-internal class ValhallaHttpClient(
+internal open class ValhallaHttpClient(
     private val connectTimeoutMillis: Int = DEFAULT_TIMEOUT_MILLIS,
     private val readTimeoutMillis: Int = DEFAULT_TIMEOUT_MILLIS,
 ) {
@@ -40,7 +40,7 @@ internal class ValhallaHttpClient(
    * @param rangeSize how many bytes to request; `0` asks for the whole resource.
    * @param acceptGzip whether a gzip body is acceptable (whole tiles with `tile_url_gz` on).
    */
-  fun get(
+  open fun get(
       url: String,
       rangeOffset: Long,
       rangeSize: Long,
@@ -51,12 +51,10 @@ internal class ValhallaHttpClient(
           // Inclusive on both ends, so the last byte is offset + size - 1.
           connection.setRequestProperty(
               "Range", "bytes=$rangeOffset-${rangeOffset + rangeSize - 1}")
-          // Otherwise the platform can negotiate gzip for a slice of a tar, and some servers then
-          // send the whole tar compressed.
+          // Keep a slice of a tar uncompressed.
           connection.setRequestProperty("Accept-Encoding", "identity")
         } else if (acceptGzip) {
-          // HttpURLConnection only inflates when it chose Accept-Encoding itself, so setting it
-          // keeps the body compressed.
+          // Set explicitly, so HttpURLConnection leaves the body compressed.
           connection.setRequestProperty("Accept-Encoding", "gzip")
         }
       }
@@ -68,7 +66,7 @@ internal class ValhallaHttpClient(
    * @param headerMask which headers the caller wants. Only [HEADER_LAST_MODIFIED] is understood;
    *   anything else is ignored, and the corresponding field is left at zero.
    */
-  fun head(url: String, headerMask: Int): ValhallaHttpResponse =
+  open fun head(url: String, headerMask: Int): ValhallaHttpResponse =
       perform(url, method = "HEAD", headerMask = headerMask) {}
 
   private fun perform(
