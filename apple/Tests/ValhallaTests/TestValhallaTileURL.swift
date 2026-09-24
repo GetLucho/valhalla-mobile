@@ -22,7 +22,16 @@ final class LocalTileServer {
         case preGzipped
         /// Answer 200 with an empty body.
         case empty
+        /// Send the tile gzipped with a corrupt byte near the end, and no `Content-Encoding`.
+        case corruptGzipTail
+        /// Answer 200 with a page that isn't a tile, like a captive portal.
+        case notATile
+        /// Answer a Range request with 200 and the whole file.
+        case ignoreRange
     }
+
+    /// The path of a remote tar built from the fixture tiles.
+    static let remoteTarPath = "remote.tar"
 
     private let listener: NWListener
     private let root: URL
@@ -30,7 +39,9 @@ final class LocalTileServer {
     private let lock = NSLock()
     private var paths: [String] = []
     private var compressedResponses = 0
+    private var rangeAcceptEncodings: [String] = []
     private var currentMode = Mode.negotiate
+    private let remoteTar: Data
 
     private(set) var port: UInt16 = 0
 
@@ -51,8 +62,15 @@ final class LocalTileServer {
         return compressedResponses
     }
 
+    /// The `Accept-Encoding` of every Range request, empty when none was sent.
+    var rangeEncodings: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return rangeAcceptEncodings
+    }
+
     init(root: URL) throws {
         self.root = root
+        remoteTar = try Self.remoteTar(root: root)
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = true
         // Loopback only: binding 0.0.0.0 triggers the macOS incoming-connections prompt.
@@ -127,28 +145,49 @@ final class LocalTileServer {
         // "GET /2/000/762/485.gph HTTP/1.1"
         let target = lines.first?.split(separator: " ").dropFirst().first
         let path = String(target ?? "/").trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let acceptsGzip = lines.contains {
-            $0.lowercased().hasPrefix("accept-encoding:") && $0.lowercased().contains("gzip")
+        func headerValue(_ name: String) -> String? {
+            lines.first { $0.lowercased().hasPrefix(name + ":") }
+                .map { $0.dropFirst(name.count + 1).trimmingCharacters(in: .whitespaces) }
         }
+        let acceptsGzip = headerValue("accept-encoding")?.lowercased().contains("gzip") == true
+        let range = headerValue("range").flatMap(Self.parseRange)
         let mode = self.mode
 
-        lock.lock(); paths.append(path); lock.unlock()
+        lock.lock()
+        paths.append(path)
+        if range != nil { rangeAcceptEncodings.append(headerValue("accept-encoding") ?? "") }
+        lock.unlock()
 
-        // Serve only files under the fixture root.
+        // Serve only files under the fixture root, and the tar built from them.
         let traversal = path.split(separator: "/").contains("..")
         let file = root.appendingPathComponent(path)
-        let stored = traversal ? nil
+        let stored = path == Self.remoteTarPath ? remoteTar
+            : traversal ? nil
             : (FileManager.default.fileExists(atPath: file.path) ? try? Data(contentsOf: file) : nil)
 
         var response = Data()
-        if let stored {
+        if let stored, let range, mode != .ignoreRange {
+            let slice = stored.subdata(in: range.clamped(to: 0..<stored.count))
+            let last = range.lowerBound + slice.count - 1
+            response.append(Data(("HTTP/1.1 206 Partial Content\r\nContent-Length: \(slice.count)\r\n"
+                + "Content-Range: bytes \(range.lowerBound)-\(last)/\(stored.count)\r\n"
+                + "Connection: close\r\n\r\n").utf8))
+            response.append(slice)
+        } else if let stored {
             let compress = mode == .negotiate && acceptsGzip
             let body: Data
             switch mode {
             case .negotiate: body = compress ? Self.gzip(stored) : stored
-            case .identity: body = stored
+            case .identity, .ignoreRange: body = stored
             case .preGzipped: body = Self.gzip(stored)
             case .empty: body = Data()
+            case .corruptGzipTail:
+                var gzip = Self.gzip(stored)
+                gzip[gzip.count - 20] ^= 0xff
+                body = gzip
+            case .notATile:
+                body = Data(("<html><body>" + String(repeating: "Sign in to continue. ", count: 100)
+                    + "</body></html>").utf8)
             }
             if compress { lock.lock(); compressedResponses += 1; lock.unlock() }
 
@@ -162,6 +201,79 @@ final class LocalTileServer {
         }
 
         connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })
+    }
+
+    /// "bytes=0-511", inclusive on both ends.
+    private static func parseRange(_ value: String) -> Range<Int>? {
+        guard value.hasPrefix("bytes=") else { return nil }
+        let bounds = value.dropFirst(6).split(separator: "-").compactMap { Int($0) }
+        return bounds.count == 2 && bounds[0] <= bounds[1] ? bounds[0]..<(bounds[1] + 1) : nil
+    }
+
+    // MARK: - Remote tar
+
+    /// A tar of the fixture tiles, laid out the way valhalla reads one remotely:
+    /// index.bin first, giving each tile's offset, id, and size.
+    static func remoteTar(root: URL) throws -> Data {
+        let base = root.resolvingSymlinksInPath().path + "/"
+        let paths = (FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)?
+            .compactMap { ($0 as? URL)?.resolvingSymlinksInPath().path } ?? [])
+            .filter { $0.hasSuffix(".gph") }
+            .map { String($0.dropFirst(base.count)) }
+            .sorted()
+        let indexSize = paths.count * 16
+        var offset = 512 + padded(indexSize)
+        var index = Data()
+        var body = Data()
+        for path in paths {
+            let tile = try Data(contentsOf: root.appendingPathComponent(path))
+            append(UInt64(offset + 512), to: &index)
+            append(tileId(path), to: &index)
+            append(UInt32(tile.count), to: &index)
+            body.append(tarHeader(name: path, size: tile.count))
+            body.append(tile)
+            body.append(Data(count: padded(tile.count) - tile.count))
+            offset += 512 + padded(tile.count)
+        }
+        var tar = tarHeader(name: "index.bin", size: indexSize)
+        tar.append(index)
+        tar.append(Data(count: padded(indexSize) - indexSize))
+        tar.append(body)
+        tar.append(Data(count: 1024))
+        return tar
+    }
+
+    private static func padded(_ size: Int) -> Int { (size + 511) / 512 * 512 }
+
+    private static func append<T: FixedWidthInteger>(_ value: T, to data: inout Data) {
+        withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
+    }
+
+    /// "2/000/762/485.gph" is level 2, tile 762485.
+    private static func tileId(_ path: String) -> UInt32 {
+        let parts = path.dropLast(4).split(separator: "/")
+        return UInt32(parts[0])! | UInt32(parts.dropFirst().joined())! << 3
+    }
+
+    private static func tarHeader(name: String, size: Int) -> Data {
+        var header = [UInt8](repeating: 0, count: 512)
+        func put(_ text: String, at offset: Int) {
+            for (i, byte) in text.utf8.enumerated() { header[offset + i] = byte }
+        }
+        put(name, at: 0)
+        put("0000644", at: 100)
+        put("0000000", at: 108)
+        put("0000000", at: 116)
+        put(String(format: "%011o", size), at: 124)
+        put("00000000000", at: 136)
+        put("0", at: 156)
+        put("ustar", at: 257)
+        put("00", at: 263)
+        put("        ", at: 148)
+        let sum = header.reduce(0) { $0 + Int($1) }
+        put(String(format: "%06o", sum), at: 148)
+        header[154] = 0
+        return Data(header)
     }
 
     // MARK: - gzip
@@ -266,6 +378,15 @@ final class TestValhallaTileURL: XCTestCase {
         return try Valhalla(config, configName: name).route(request: andorraRoute)
     }
 
+    /// Routes from a remote tar, which valhalla reads in byte ranges.
+    private func routeFromTar(tilesAreGzFiles: Bool) throws -> RouteResponse {
+        let config = try ValhallaConfig(
+            tilesUrl: "http://127.0.0.1:\(server.port)/\(LocalTileServer.remoteTarPath)",
+            tilesDir: tilesDir,
+            tilesAreGzFiles: tilesAreGzFiles)
+        return try Valhalla(config, configName: "tile-url-tar.json").route(request: andorraRoute)
+    }
+
     /// Every tile file valhalla stored, keyed by its path relative to `tilesDir`.
     private func storedTiles() throws -> [String: Data] {
         let root = tilesDir.resolvingSymlinksInPath().path + "/"
@@ -297,6 +418,27 @@ final class TestValhallaTileURL: XCTestCase {
             XCTAssertEqual(inflated, try servedTile(for: path),
                            "\(path) does not match the server", file: file, line: line)
         }
+    }
+
+    /// Every stored tile is raw and matches the served tile.
+    private func assertStoredRaw(file: StaticString = #filePath, line: UInt = #line) throws {
+        let tiles = try storedTiles()
+        XCTAssertFalse(tiles.isEmpty, "valhalla stored no tiles", file: file, line: line)
+        for (path, stored) in tiles {
+            XCTAssertTrue(path.hasSuffix(".gph"), "\(path) was stored compressed", file: file, line: line)
+            XCTAssertEqual(stored, try servedTile(for: path), "\(path) does not match the server",
+                           file: file, line: line)
+        }
+    }
+
+    /// Nothing was cached, so a later launch fetches again instead of loading a broken tile.
+    private func assertNothingStored(_ why: String, file: StaticString = #filePath, line: UInt = #line) throws {
+        XCTAssertTrue(try storedTiles().isEmpty, why, file: file, line: line)
+    }
+
+    private func resetTilesDir() throws {
+        try FileManager.default.removeItem(at: tilesDir)
+        try FileManager.default.createDirectory(at: tilesDir, withIntermediateDirectories: true)
     }
 
     func testStoresTilesGzipped() throws {
@@ -344,11 +486,30 @@ final class TestValhallaTileURL: XCTestCase {
         try assertStoredGzipped()
     }
 
-    func testRejectsPreGzippedTilesWithTheFlagOff() throws {
+    func testInflatesPreGzippedTilesWithTheFlagOff() throws {
         server.mode = .preGzipped
 
-        XCTAssertThrowsError(try route(tilesAreGzFiles: false))
-        XCTAssertTrue(try storedTiles().isEmpty, "a gzip body was stored as a raw tile")
+        let response = try route(tilesAreGzFiles: false)
+
+        XCTAssertEqual(response.trip.statusMessage, "Found route between points")
+        try assertStoredRaw()
+    }
+
+    /// A gzip body whose header is fine but whose tail is corrupt used to crash valhalla 3.9.0.
+    func testRejectsAGzipBodyWithACorruptTail() throws {
+        server.mode = .corruptGzipTail
+        for gzipped in [true, false] {
+            XCTAssertThrowsError(try route(tilesAreGzFiles: gzipped))
+            try assertNothingStored("a corrupt gzip body was stored (gzip \(gzipped))")
+        }
+    }
+
+    func testRejectsABodyThatIsNotATile() throws {
+        server.mode = .notATile
+        for gzipped in [true, false] {
+            XCTAssertThrowsError(try route(tilesAreGzFiles: gzipped))
+            try assertNothingStored("a page that isn't a tile was stored (gzip \(gzipped))")
+        }
     }
 
     /// An empty body used to be stored as a tile that failed on every later load.
@@ -356,14 +517,13 @@ final class TestValhallaTileURL: XCTestCase {
         for gzipped in [true, false] {
             server.mode = .empty
             XCTAssertThrowsError(try route(tilesAreGzFiles: gzipped))
-            XCTAssertTrue(try storedTiles().isEmpty, "an empty body was stored (gzip \(gzipped))")
+            try assertNothingStored("an empty body was stored (gzip \(gzipped))")
 
             server.mode = .negotiate
             let response = try route(tilesAreGzFiles: gzipped)
             XCTAssertEqual(response.trip.statusMessage, "Found route between points")
 
-            try FileManager.default.removeItem(at: tilesDir)
-            try FileManager.default.createDirectory(at: tilesDir, withIntermediateDirectories: true)
+            try resetTilesDir()
         }
     }
 
@@ -371,11 +531,24 @@ final class TestValhallaTileURL: XCTestCase {
         let response = try route(tilesAreGzFiles: false)
 
         XCTAssertEqual(response.trip.statusMessage, "Found route between points")
-        let tiles = try storedTiles()
-        XCTAssertFalse(tiles.isEmpty, "valhalla stored no tiles")
-        for (path, stored) in tiles {
-            XCTAssertTrue(path.hasSuffix(".gph"), "\(path) was stored compressed")
-            XCTAssertEqual(stored, try servedTile(for: path), "\(path) does not match the server")
-        }
+        try assertStoredRaw()
+    }
+
+    /// A remote tar holds raw tiles, so tile_url_gz doesn't apply to it.
+    func testRemoteTarIgnoresTileUrlGz() throws {
+        let response = try routeFromTar(tilesAreGzFiles: true)
+
+        XCTAssertEqual(response.trip.statusMessage, "Found route between points")
+        try assertStoredRaw()
+        // Otherwise a server can answer a slice of the tar with the whole tar compressed.
+        XCTAssertFalse(server.rangeEncodings.isEmpty, "valhalla sent no range requests")
+        XCTAssertEqual(Set(server.rangeEncodings), ["identity"])
+    }
+
+    func testRejectsARangeTheServerIgnored() throws {
+        server.mode = .ignoreRange
+
+        XCTAssertThrowsError(try routeFromTar(tilesAreGzFiles: false))
+        try assertNothingStored("the whole tar was stored as a tile")
     }
 }

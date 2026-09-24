@@ -38,8 +38,7 @@ internal class ValhallaHttpClient(
    * @param url the tile URL, already filled in by valhalla.
    * @param rangeOffset first byte to request. Only used when [rangeSize] is positive.
    * @param rangeSize how many bytes to request; `0` asks for the whole resource.
-   * @param acceptGzip whether a gzip body can be returned as is. Set for whole tiles when
-   *   `mjolnir.tile_url_gz` is on.
+   * @param acceptGzip whether a gzip body is acceptable (whole tiles with `tile_url_gz` on).
    */
   fun get(
       url: String,

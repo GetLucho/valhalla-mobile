@@ -36,9 +36,10 @@ val config = ValhallaConfigFactory.usingTileUrl(
 )
 ```
 
-Valhalla fills the `{tilePath}` portion in with the tile it wants. `tilesAreGzFiles = true` stores
-downloaded tiles gzip-compressed, whether or not the server compresses them; it is ignored for a
-tar URL.
+Valhalla fills the `{tilePath}` portion in with the tile it wants.
+`tilesAreGzFiles` decides whether downloaded tiles are stored gzip-compressed or raw,
+whatever the server sends.
+It is ignored for a tar URL.
 
 Fetching goes through `java.net.HttpURLConnection`, so this adds no networking dependency to your
 app. Three things to know:

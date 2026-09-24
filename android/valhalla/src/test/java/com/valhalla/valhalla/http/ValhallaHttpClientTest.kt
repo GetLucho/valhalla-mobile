@@ -65,7 +65,7 @@ class ValhallaHttpClientTest {
   }
 
   @Test
-  fun `asks for gzip when a gzip body is accepted`() {
+  fun asksForGzipWhenAccepted() {
     val response = ValhallaHttpClient().get(baseUrl, 0, 0, acceptGzip = true)
 
     assertEquals("gzip", sentAcceptEncoding)
@@ -75,7 +75,7 @@ class ValhallaHttpClientTest {
 
   /** The wrapper compresses a plain body, so this is not a failure. */
   @Test
-  fun `returns a plain body when the server ignores the request for gzip`() {
+  fun returnsPlainBodyWhenServerIgnoresGzip() {
     forcedEncoding = "identity"
 
     val response = ValhallaHttpClient().get(baseUrl, 0, 0, acceptGzip = true)
@@ -85,7 +85,7 @@ class ValhallaHttpClientTest {
   }
 
   @Test
-  fun `leaves the encoding to the platform when gzip is not accepted`() {
+  fun leavesEncodingToPlatformWhenGzipNotAccepted() {
     val response = ValhallaHttpClient().get(baseUrl, 0, 0, acceptGzip = false)
 
     assertNull(sentAcceptEncoding)
@@ -94,7 +94,7 @@ class ValhallaHttpClientTest {
   }
 
   @Test
-  fun `asks for identity on a range request`() {
+  fun asksForIdentityOnRangeRequest() {
     ValhallaHttpClient().get(baseUrl, 0, 4, acceptGzip = false)
 
     assertEquals("identity", sentAcceptEncoding)

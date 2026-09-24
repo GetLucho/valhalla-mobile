@@ -92,8 +92,8 @@ let config = try ValhallaConfig(
 let valhalla = try Valhalla(config)
 ```
 
-Pass `tilesAreGzFiles: true` to store downloaded tiles gzip-compressed. Each tile is compressed on
-download, which costs some CPU.
+Pass `tilesAreGzFiles: true` to store downloaded tiles gzip-compressed, whatever the server sends.
+Each tile is compressed on download, which costs some CPU.
 
 Fetching goes through `NSURLSession`, so this adds no networking dependency to your app, and
 nothing to configure beyond the URL. Two things to know:

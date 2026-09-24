@@ -129,9 +129,9 @@ object ValhallaConfigFactory {
      *
      * @param tilesUrl the URL pattern tiles are fetched from.
      * @param tilesDir absolute path of the directory downloaded tiles are stored in.
-     * @param tilesAreGzFiles whether to store downloaded tiles gzip-compressed, whether or not the
-     *   server compresses them. Ignored when [tilesUrl] is a tar. A decompressed tile can use
-     *   more memory than its size, which `max_cache_size` doesn't count.
+     * @param tilesAreGzFiles whether to store downloaded tiles gzip-compressed or raw, whatever the
+     *   server sends. Ignored for a tar URL. A decompressed tile can outgrow what `max_cache_size`
+     *   counts.
      */
     fun usingTileUrl(
         tilesUrl: String,

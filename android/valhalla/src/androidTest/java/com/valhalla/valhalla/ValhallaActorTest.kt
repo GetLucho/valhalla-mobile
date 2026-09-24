@@ -260,7 +260,7 @@ class ValhallaActorTest {
   }
 
   @Test
-  fun testMatrixNoSuitableEdges() {
+  fun testMatrixWithNoRoadsNearby() {
     val valhalla = actor(configPath)
 
     val request =

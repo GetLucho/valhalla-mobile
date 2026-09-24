@@ -19,8 +19,7 @@ public:
      * @param url the URL to fetch
      * @param range_offset offset for range requests
      * @param range_size size for range requests, or 0 for the whole resource
-     * @param accept_gzip whether a gzip-compressed body can be returned as is. Only set for whole
-     *        tiles with `mjolnir.tile_url_gz` on. A plain body is fine too; the wrapper compresses it.
+     * @param accept_gzip whether a gzip body is acceptable (whole tiles with tile_url_gz on)
      * @return GET_response_t with the response data and status
      */
     virtual valhalla::baldr::tile_getter_t::GET_response_t
