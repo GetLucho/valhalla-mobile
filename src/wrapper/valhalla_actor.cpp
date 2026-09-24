@@ -76,8 +76,8 @@ bool gunzip(const std::vector<char>& gzip, std::vector<char>& out) {
             fed = true;
         }
     };
-    // Room for the header, then for the size it records plus one byte, so a bigger tile fills
-    // it. Deflate can't shrink data more than 1032 times, so a header claiming more is lying.
+    // Room for the header, then doubling from four times the body up to the size it records
+    // plus one byte, so a bigger tile fills it and memory follows what actually inflates.
     auto dst = [&](z_stream& s) {
         unread = s.avail_in;
         const size_t done = out.size();
@@ -90,11 +90,11 @@ bool gunzip(const std::vector<char>& gzip, std::vector<char>& out) {
             GraphTileHeader header;
             std::memcpy(&header, out.data(), sizeof(header));
             const size_t claimed = header.end_offset();
-            if (done > sizeof(header) || claimed < sizeof(header) ||
-                claimed >= std::numeric_limits<uInt>::max() || claimed / 1032 > gzip.size()) {
+            if (done > claimed || claimed < sizeof(header) ||
+                claimed >= std::numeric_limits<uInt>::max()) {
                 throw std::length_error("not one whole tile");
             }
-            size = claimed + 1;
+            size = std::min(claimed + 1, std::max(done * 2, gzip.size() * 4));
         }
         out.resize(size);
         s.next_out = reinterpret_cast<Bytef*>(out.data() + done);
