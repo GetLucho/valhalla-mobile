@@ -171,11 +171,24 @@ class ValhallaTileUrlTest {
                   }
                 },
             "gzip twice" to { LocalTileServer.gzip(LocalTileServer.gzip(it)) },
+            "gzip with bytes after it" to { LocalTileServer.gzip(it) + byteArrayOf(0) },
+            "two gzip members" to { LocalTileServer.gzip(it) + LocalTileServer.gzip(it) },
+            "gzip bigger than its header says" to
+                {
+                  LocalTileServer.gzip(it + ByteArray(1 shl 20))
+                },
+            // Read as a header, the text claims a tile of over 500 MB.
+            "a gzipped html page" to
+                {
+                  LocalTileServer.gzip("<html>${"Sign in. ".repeat(100)}</html>".toByteArray())
+                },
         )
     for ((name, body) in bodies) {
       for (gzipped in listOf(true, false)) {
         client.body = body
+        client.requests.clear()
         assertNull("$name, gzip $gzipped", route(gzipped))
+        assertTrue("$name was not fetched, gzip $gzipped", client.requests.isNotEmpty())
         assertTrue("$name was stored, gzip $gzipped", storedTiles().isEmpty())
       }
     }

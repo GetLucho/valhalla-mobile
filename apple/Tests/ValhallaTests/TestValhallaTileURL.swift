@@ -61,7 +61,10 @@ final class LocalTileServer {
             throw NSError(domain: "LocalTileServer", code: 1)
         }
         if let failure { throw failure }
-        port = listener.port?.rawValue ?? 0
+        guard let port = listener.port?.rawValue else {
+            throw NSError(domain: "LocalTileServer", code: 2)
+        }
+        self.port = port
     }
 
     func stop() {

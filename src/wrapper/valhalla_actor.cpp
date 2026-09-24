@@ -3,7 +3,9 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <limits>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include <type_traits>
@@ -45,7 +47,7 @@ bool is_whole_tile(const std::vector<char>& bytes) {
     return header.end_offset() == bytes.size();
 }
 
-// Grows `out` as valhalla's inflate or deflate fills it, and trims it once they finish.
+// Grows `out` as valhalla's deflate fills it, and trims it once it finishes.
 void grow(z_stream& s, std::vector<char>& out, size_t step) {
     const size_t size = out.size();
     if (s.total_out < size) {
@@ -57,8 +59,15 @@ void grow(z_stream& s, std::vector<char>& out, size_t step) {
     s.avail_out = static_cast<uInt>(step);
 }
 
+// Inflates one gzip member into `out`, which is sized from the tile header it starts with.
+// A body that inflates past that size, or has bytes after the member, fails.
 bool gunzip(const std::vector<char>& gzip, std::vector<char>& out) {
+    using valhalla::baldr::GraphTileHeader;
+    if (gzip.size() > std::numeric_limits<uInt>::max()) {
+        return false;
+    }
     bool fed = false;
+    uInt unread = 0;
     // Fed once, so a truncated stream fails instead of reading itself again.
     auto src = [&](z_stream& s) {
         if (!fed) {
@@ -67,11 +76,33 @@ bool gunzip(const std::vector<char>& gzip, std::vector<char>& out) {
             fed = true;
         }
     };
+    // Room for the header, then for the size it records plus one byte, so a bigger tile fills
+    // it. Deflate can't shrink data more than 1032 times, so a header claiming more is lying.
     auto dst = [&](z_stream& s) {
-        grow(s, out, std::max<size_t>(gzip.size() * 3, 64 * 1024));
+        unread = s.avail_in;
+        const size_t done = out.size();
+        if (s.total_out < done) {
+            out.resize(s.total_out);
+            return Z_NO_FLUSH;
+        }
+        size_t size = sizeof(GraphTileHeader);
+        if (done > 0) {
+            GraphTileHeader header;
+            std::memcpy(&header, out.data(), sizeof(header));
+            const size_t claimed = header.end_offset();
+            if (done > sizeof(header) || claimed < sizeof(header) ||
+                claimed >= std::numeric_limits<uInt>::max() || claimed / 1032 > gzip.size()) {
+                throw std::length_error("not one whole tile");
+            }
+            size = claimed + 1;
+        }
+        out.resize(size);
+        s.next_out = reinterpret_cast<Bytef*>(out.data() + done);
+        s.avail_out = static_cast<uInt>(size - done);
         return Z_NO_FLUSH;
     };
-    return valhalla::baldr::inflate(src, dst);
+    out.clear();
+    return valhalla::baldr::inflate(src, dst) && unread == 0;
 }
 
 bool gzip_tile(const std::vector<char>& plain, std::vector<char>& out) {
@@ -174,8 +205,6 @@ private:
       std::vector<char> plain;
       ok = gunzip(bytes, plain) && is_whole_tile(plain);
       if (ok && !is_gzipped) {
-        // Valhalla keeps this vector as the tile.
-        plain.shrink_to_fit();
         bytes.swap(plain);
       }
     } else if (!is_whole_tile(bytes)) {
