@@ -26,6 +26,9 @@ class ValhallaHttpClientTest {
   @Volatile
   private var payload: ByteArray = "a tile, long enough that gzip changes it".toByteArray()
 
+  /** Overrides the response encoding, for a server that ignores Accept-Encoding. */
+  @Volatile private var forcedEncoding: String? = null
+
   @Before
   fun startServer() {
     server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
@@ -33,7 +36,7 @@ class ValhallaHttpClientTest {
       val accept = exchange.requestHeaders.getFirst("Accept-Encoding")
       sentAcceptEncoding = accept
 
-      val encoding = if (accept?.contains("gzip") == true) "gzip" else "identity"
+      val encoding = forcedEncoding ?: if (accept?.contains("gzip") == true) "gzip" else "identity"
       val body = if (encoding == "gzip") gzip(payload) else payload
 
       if (encoding != "identity") exchange.responseHeaders.add("Content-Encoding", encoding)
@@ -56,8 +59,27 @@ class ValhallaHttpClientTest {
   }
 
   @Test
-  fun leavesEncodingToPlatformForWholeTile() {
-    val response = ValhallaHttpClient().get(baseUrl, 0, 0)
+  fun asksForGzipWhenAccepted() {
+    val response = ValhallaHttpClient().get(baseUrl, 0, 0, acceptGzip = true)
+
+    assertEquals("gzip", sentAcceptEncoding)
+    assertTrue(response.success)
+    assertArrayEquals(gzip(payload), response.body)
+  }
+
+  @Test
+  fun returnsPlainBodyWhenServerIgnoresGzip() {
+    forcedEncoding = "identity"
+
+    val response = ValhallaHttpClient().get(baseUrl, 0, 0, acceptGzip = true)
+
+    assertTrue(response.success)
+    assertArrayEquals(payload, response.body)
+  }
+
+  @Test
+  fun leavesEncodingToPlatformWhenGzipNotAccepted() {
+    val response = ValhallaHttpClient().get(baseUrl, 0, 0, acceptGzip = false)
 
     assertNull(sentAcceptEncoding)
     assertTrue(response.success)
@@ -66,7 +88,7 @@ class ValhallaHttpClientTest {
 
   @Test
   fun asksForIdentityOnRangeRequest() {
-    ValhallaHttpClient().get(baseUrl, 0, 4)
+    ValhallaHttpClient().get(baseUrl, 0, 4, acceptGzip = false)
 
     assertEquals("identity", sentAcceptEncoding)
   }

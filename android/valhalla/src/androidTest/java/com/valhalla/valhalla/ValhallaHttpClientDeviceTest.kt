@@ -31,8 +31,17 @@ class ValhallaHttpClientDeviceTest {
     get() = "http://127.0.0.1:${server.port}/$TILE"
 
   @Test
-  fun testThePlatformNegotiatesGzipAndInflates() {
-    val response = ValhallaHttpClient().get(url, 0, 0)
+  fun testAcceptGzipKeepsTheBodyCompressed() {
+    val response = ValhallaHttpClient().get(url, 0, 0, acceptGzip = true)
+
+    assertTrue(response.success)
+    assertEquals("gzip", server.acceptEncodings.single())
+    assertArrayEquals(server.fixture(TILE), LocalTileServer.gunzip(requireNotNull(response.body)))
+  }
+
+  @Test
+  fun testWithoutAcceptGzipThePlatformInflates() {
+    val response = ValhallaHttpClient().get(url, 0, 0, acceptGzip = false)
 
     assertTrue(response.success)
     assertTrue(server.acceptEncodings.single()?.contains("gzip") == true)
@@ -41,7 +50,7 @@ class ValhallaHttpClientDeviceTest {
 
   @Test
   fun testRangeRequestsAskForIdentity() {
-    ValhallaHttpClient().get(url, 0, 512)
+    ValhallaHttpClient().get(url, 0, 512, acceptGzip = false)
 
     assertEquals("identity", server.acceptEncodings.single())
   }
