@@ -136,7 +136,10 @@ extension ValhallaConfig {
     ///
     /// - Parameters:
     ///  - tilesUrl: The Url pattern which will be used to download the tiles. Valhalla will look for the {tilePath} portion of the url and fill this out with a given tile path when it make a request for that tile.
-    ///  - tilesAreGzFiles: If true, the downloaded files will be treated as gz-compressed tiles files
+    ///  - tilesAreGzFiles: If true, downloaded tiles are stored gzip-compressed, whether or not the
+    ///    server compresses them. Ignored when `tilesUrl` is a tar. NSURLSession always decompresses
+    ///    downloads, so each tile is compressed again, at some CPU cost. A decompressed tile can
+    ///    also use more memory than its size, which `max_cache_size` doesn't count.
     ///  - tilesDir: The local folder path URL where the downloaded tiles will be stored
     public init(tilesUrl: String, tilesDir: URL, tilesAreGzFiles: Bool = false) throws {
         let defaultConfig = ValhallaConfig.loadDefault()

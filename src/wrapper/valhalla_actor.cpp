@@ -1,16 +1,23 @@
+#include <algorithm>
 #include <cstddef>
+#include <cstdio>
 #include <exception>
+#include <limits>
 #include <memory>
 #include <string>
 #include <system_error>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include <cmath>
 #include <pthread.h>
+#include <zlib.h>
 
 #include <boost/property_tree/ptree.hpp>
 #include <valhalla/tyr/actor.h>
+#include <valhalla/baldr/compression_utils.h>
+#include <valhalla/baldr/graphtileheader.h>
 #include <valhalla/baldr/rapidjson_utils.h>
 #include <valhalla/baldr/graphid.h>
 #include <valhalla/baldr/graphtile.h>
@@ -18,6 +25,71 @@
 #include <valhalla/loki/worker.h>
 #include <valhalla/midgard/pointll.h>
 #include "valhalla_actor.h"
+
+namespace {
+
+/// zlib level for tiles that arrive uncompressed. Level 1 is the fastest: on a 37 MB tile
+/// (Apple M4) it took 275 ms for 39.5% of the raw size, against 1.2 s for 35.5% at level 6.
+constexpr int kTileGzipLevel = 1;
+
+constexpr size_t kTileHeaderSize = sizeof(valhalla::baldr::GraphTileHeader);
+
+/// A raw tile can't start with the gzip magic: its first byte holds the hierarchy level in the
+/// low 3 bits, and 0x1f would mean level 7.
+bool HasGzipMagic(const char* bytes, size_t size) {
+  return size >= 2 && static_cast<unsigned char>(bytes[0]) == 0x1f &&
+         static_cast<unsigned char>(bytes[1]) == 0x8b;
+}
+
+/// Whether a gzip stream starts with a whole tile header that isn't itself gzip. Only the header
+/// is inflated.
+bool InflatesToTileHeader(const std::vector<char>& gzip) {
+  if (gzip.size() > std::numeric_limits<uInt>::max()) {
+    return false;
+  }
+  z_stream stream{};
+  if (inflateInit2(&stream, MAX_WBITS + 16) != Z_OK) {
+    return false;
+  }
+  char header[kTileHeaderSize];
+  stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(gzip.data()));
+  stream.avail_in = static_cast<uInt>(gzip.size());
+  stream.next_out = reinterpret_cast<Bytef*>(header);
+  stream.avail_out = sizeof(header);
+  const int status = ::inflate(&stream, Z_SYNC_FLUSH);
+  const bool whole = stream.avail_out == 0 && (status == Z_OK || status == Z_STREAM_END);
+  inflateEnd(&stream);
+  return whole && !HasGzipMagic(header, sizeof(header));
+}
+
+/// Gzips `plain` into `out`, using valhalla's deflate, which cleans up if an allocation throws.
+bool Gzip(const std::vector<char>& plain, std::vector<char>& out) {
+  if (plain.size() > std::numeric_limits<uInt>::max()) {
+    return false;
+  }
+  out.clear();
+  auto src = [&plain](z_stream& s) -> int {
+    s.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(plain.data()));
+    s.avail_in = static_cast<uInt>(plain.size());
+    return Z_FINISH;
+  };
+  // Called when the output is full, and once more at the end to trim it. Tiles usually compress
+  // to under half their size.
+  auto dst = [&plain, &out](z_stream& s) {
+    const size_t size = out.size();
+    if (s.total_out < size) {
+      out.resize(s.total_out);
+      return;
+    }
+    const size_t step = std::max<size_t>(plain.size() / 2, 64 * 1024);
+    out.resize(size + step);
+    s.next_out = reinterpret_cast<Bytef*>(out.data() + size);
+    s.avail_out = static_cast<uInt>(step);
+  };
+  return valhalla::baldr::deflate(src, dst, kTileGzipLevel, true);
+}
+
+} // namespace
 
 class TileGetterWrapper : public valhalla::baldr::tile_getter_t {
 public:
@@ -45,7 +117,7 @@ public:
    * @param http_client  client used to perform HTTP GET/HEAD tile requests;
    *                      ownership is transferred to the wrapper. May be null,
    *                      in which case requests report FAILURE.
-   * @param is_gzipped  whether tiles are requested as gzip-compressed data
+   * @param is_gzipped  whether valhalla stores tiles gzip-compressed
    */
   TileGetterWrapper(std::unique_ptr<ValhallaMobileHttpClient> http_client, bool is_gzipped): http_client(std::move(http_client)), is_gzipped(is_gzipped) {
   }
@@ -59,10 +131,18 @@ public:
       (*interrupt_)();
     }
     GET_response_t result;
-    if (http_client) { 
-        result = http_client->get(url, range_offset, range_size);
-    } else {
-        result.status_ = tile_getter_t::status_code_t::FAILURE;
+    if (!http_client) {
+      result.status_ = tile_getter_t::status_code_t::FAILURE;
+      return result;
+    }
+    // Ranges are slices of a remote tar and are passed through as is.
+    if (range_size > 0) {
+      return http_client->get(url, range_offset, range_size, false);
+    }
+    result = http_client->get(url, 0, 0, is_gzipped);
+    if (result.status_ == tile_getter_t::status_code_t::SUCCESS &&
+        !to_stored_form(url, result.bytes_)) {
+      result.status_ = tile_getter_t::status_code_t::FAILURE;
     }
     return result;
   }
@@ -85,6 +165,37 @@ public:
   }
 
 private:
+  /**
+   * Checks a downloaded tile and converts it to the form valhalla stores: gzip when is_gzipped,
+   * raw otherwise. Valhalla caches whatever it is handed, so a body that isn't a tile has to be
+   * rejected here, or it fails on every later load.
+   */
+  bool to_stored_form(const std::string& url, std::vector<char>& bytes) const {
+    const char* problem = nullptr;
+    if (HasGzipMagic(bytes.data(), bytes.size())) {
+      // The server sent gzip and the client kept it, or the server hosts .gz files.
+      if (!is_gzipped) {
+        problem = "is gzip-compressed, but tile_url_gz is off";
+      } else if (!InflatesToTileHeader(bytes)) {
+        problem = "is not a gzip-compressed tile";
+      }
+    } else if (bytes.size() < kTileHeaderSize) {
+      // Also stops valhalla reading a whole header past the end of a short raw body.
+      problem = "is too small to be a tile";
+    } else if (is_gzipped) {
+      std::vector<char> gzip;
+      if (Gzip(bytes, gzip)) {
+        bytes.swap(gzip);
+      } else {
+        problem = "could not be gzip-compressed";
+      }
+    }
+    if (problem) {
+      printf("[ValhallaActor] tile %s %s\n", url.c_str(), problem);
+    }
+    return problem == nullptr;
+  }
+
   bool is_gzipped;
   std::unique_ptr<ValhallaMobileHttpClient> http_client;
   // Owned by GraphReader, which outlives this getter.
@@ -219,21 +330,13 @@ ValhallaActor::ValhallaActor(const std::string& config_path,
     // When no tile_url is set, http_client_owned is left to free the client at
     // scope exit (loose-tile mode needs no getter).
     std::unique_ptr<TileGetterWrapper> tile_getter;
-    if (!mjolnir_config.get<std::string>("tile_url", std::string()).empty()) {
-      // The client has to be told before it is handed over: it decides its own
-      // Accept-Encoding, and TileGetterWrapper::gzipped() promises Valhalla that
-      // whatever comes back matches. Told once here, so the two cannot disagree.
-      const bool tile_url_gz = mjolnir_config.get<bool>("tile_url_gz", false);
-      bool gzipped = false;
-      if (http_client_owned) {
-        http_client_owned->set_gzipped(tile_url_gz);
-        // What the client can actually deliver, not what was asked for. See
-        // ValhallaMobileHttpClient::delivers_compressed_bytes: reporting the
-        // request rather than the capability is a SIGSEGV on iOS, because
-        // valhalla inflates a body the platform already inflated and then
-        // dereferences the null that DecompressTile returns.
-        gzipped = tile_url_gz && http_client_owned->delivers_compressed_bytes();
-      }
+    const auto tile_url = mjolnir_config.get<std::string>("tile_url", std::string());
+    if (!tile_url.empty()) {
+      // A remote tar is read in byte ranges that are passed through as is, so gzip only applies
+      // to URLs that name each tile.
+      const bool gzipped =
+          mjolnir_config.get<bool>("tile_url_gz", false) &&
+          tile_url.find(valhalla::baldr::GraphTile::kTilePathPattern) != std::string::npos;
       tile_getter = std::make_unique<TileGetterWrapper>(std::move(http_client_owned), gzipped);
     }
     graph_reader = std::make_unique<valhalla::baldr::GraphReader>(
