@@ -67,11 +67,11 @@ private:
     /// the deadline fired is how an action that gave up is told apart from one that looked
     /// and found nothing, without archaeology through internals that are not ours.
     std::atomic<bool> deadline_fired{false};
-    /// Fetches that failed other than with a 404, counted by the tile getter.
+    /// Fetches that failed other than with a 404 or 410, counted by the tile getter.
     std::atomic<uint32_t> fetch_failures{0};
     /// [fetch_failures] when the running action was armed.
     uint32_t fetch_failures_at_arm = 0;
-    /// Whether a fetch failed, other than with a 404, since the running action was armed.
+    /// Whether a fetch failed, other than with a 404 or 410, since the running action was armed.
     bool fetch_failed() const;
     /// Set by [cancel], cleared by [resume]. Read from the fetching thread.
     std::atomic<bool> owned_cancelled{false};
@@ -109,7 +109,7 @@ public:
 
     /// The exact text [TimedOut] carries when [cancel] was called.
     static constexpr const char* kCancelledMessage = "valhalla-mobile: cancelled";
-    /// The exact text of the error when a tile fetch failed, other than with a 404.
+    /// The exact text of the error when a tile fetch failed, other than with a 404 or 410.
     static constexpr const char* kFetchFailedMessage = "valhalla-mobile: tile fetch failed";
 
     /// Raised when an action gave up because [set_tile_fetch_timeout_seconds] elapsed.
@@ -157,7 +157,7 @@ public:
      * rebuild detection. A second downloader would be a second set of all of those.
      *
      * @return true when the tile is now cached, false when the origin does not have it.
-     *         Throws on a deadline, a cancel, or a fetch that failed other than with a 404.
+     *         Throws on a deadline, a cancel, or a fetch that failed other than with a 404 or 410.
      *
      * A false is normal and is not an error: two of the sixteen level-2 tiles over Lake and
      * Porter counties are Lake Michigan. A prefetch that treated a miss as failure could not
@@ -190,10 +190,10 @@ public:
      * exists for a caller that needs to change it after construction.
      *
      * This is not the same as an HTTP timeout and does not replace one. A platform client
-     * caps a single request; one route attempts tile after tile, each paying its own
-     * timeout in turn, so the operation is unbounded even when every request is bounded.
-     * Measured against a dead origin on an iOS simulator with a 10 s per-request cap: 170
-     * seconds, during which the app looks frozen.
+     * gives up on a request after 10 s without data; one route attempts tile after tile,
+     * each paying that in turn. Measured against a dead origin on an iOS simulator: 170
+     * seconds, during which the app looks frozen. A download that keeps trickling is
+     * bounded only by the link.
      *
      * Checked between tile fetches, so the granularity is one request. A fetch already in
      * flight when the deadline passes is not cancelled -- it finishes or hits its own

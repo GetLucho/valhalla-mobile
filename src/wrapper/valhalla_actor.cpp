@@ -127,8 +127,8 @@ public:
    * override it makes GraphReader::SetInterrupt silently do nothing -- the call succeeds,
    * the callback is stored, and it is never invoked. That is what this class did.
    *
-   * It matters because a per-request HTTP timeout does not bound the operation. Both
-   * platform clients already cap a single request at 10 s, and a route against a dead
+   * It matters because an HTTP timeout does not bound the operation. Both platform
+   * clients give up on a request after 10 s without data, and a route against a dead
    * origin still took 170 seconds measured on an iOS simulator: one route attempts tile
    * after tile, each paying its own timeout in turn. Bounding the whole operation needs a
    * check between fetches, which is exactly what this is.
@@ -145,7 +145,7 @@ public:
    *                      ownership is transferred to the wrapper. May be null,
    *                      in which case requests report FAILURE.
    * @param is_gzipped  whether valhalla stores tiles gzip-compressed
-   * @param failures  counts fetches that fail other than with a 404; owned by the actor
+   * @param failures  counts fetches that fail other than with a 404 or 410; owned by the actor
    */
   TileGetterWrapper(std::unique_ptr<ValhallaMobileHttpClient> http_client, bool is_gzipped,
                     std::atomic<uint32_t>* failures)
@@ -205,7 +205,8 @@ public:
   }
 
 private:
-  // Anything but a 404 may be the connection, so RetryingGraphReader lets the next action retry it.
+  // Anything but a 404 or 410 may be the connection, so RetryingGraphReader lets the next action
+  // retry it.
   void count_failure(const GET_response_t& result) const {
     if (result.http_code_ != 404 && result.http_code_ != 410) {
       failures_->fetch_add(1, std::memory_order_relaxed);
@@ -244,7 +245,7 @@ private:
 };
 
 // GraphReader remembers every tile it failed to fetch until it's rebuilt. This one forgets
-// those that failed other than with a 404 when [forget_failures] is called, so an action
+// those that failed other than with a 404 or 410 when [forget_failures] is called, so an action
 // still skips them, as it would offline, but the next one retries.
 class RetryingGraphReader : public valhalla::baldr::GraphReader {
 public:
