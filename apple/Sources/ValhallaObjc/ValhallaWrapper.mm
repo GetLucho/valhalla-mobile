@@ -24,13 +24,11 @@ namespace {
  * @param request       the request to run.
  * @param outResponse   set to the HTTP response, or nil if the request never got one.
  * @param outError      set to the transport error, if there was one.
- * @param timeout_seconds  how long the whole request may take before it's cancelled, or 0.
  * @return              the response body, or nil.
  */
 NSData* PerformSynchronously(NSURLRequest* request,
                              NSHTTPURLResponse* __strong * outResponse,
-                             NSError* __strong * outError,
-                             double timeout_seconds = 0) {
+                             NSError* __strong * outError) {
     __block NSData* data = nil;
     __block NSURLResponse* response = nil;
     __block NSError* error = nil;
@@ -48,15 +46,7 @@ NSData* PerformSynchronously(NSURLRequest* request,
             dispatch_semaphore_signal(finished);
         }];
     [task resume];
-    // timeoutInterval only bounds the gap between packets, so a trickling body needs a cap here.
-    const dispatch_time_t limit =
-        timeout_seconds > 0
-            ? dispatch_time(DISPATCH_TIME_NOW, static_cast<int64_t>(timeout_seconds * NSEC_PER_SEC))
-            : DISPATCH_TIME_FOREVER;
-    if (dispatch_semaphore_wait(finished, limit) != 0) {
-        [task cancel];
-        dispatch_semaphore_wait(finished, DISPATCH_TIME_FOREVER);
-    }
+    dispatch_semaphore_wait(finished, DISPATCH_TIME_FOREVER);
 
     // A non-HTTP response cannot carry a status code, so it is treated as no response at all.
     *outResponse = [response isKindOfClass:[NSHTTPURLResponse class]]
@@ -77,7 +67,7 @@ public:
     /// NSURLSession always decompresses, so accept_gzip is ignored; the tile getter recompresses.
     valhalla::baldr::tile_getter_t::GET_response_t
     get(const std::string& url, uint64_t range_offset, uint64_t range_size,
-        bool /*accept_gzip*/, double timeout_seconds) override {
+        bool /*accept_gzip*/) override {
         valhalla::baldr::tile_getter_t::GET_response_t response;
         
         @autoreleasepool {
@@ -106,7 +96,7 @@ public:
             NSHTTPURLResponse* httpResponse = nil;
             NSError* error = nil;
             
-            NSData* data = PerformSynchronously(request, &httpResponse, &error, timeout_seconds);
+            NSData* data = PerformSynchronously(request, &httpResponse, &error);
             
             if (error || !httpResponse) {
                 response.status_ = valhalla::baldr::tile_getter_t::status_code_t::FAILURE;

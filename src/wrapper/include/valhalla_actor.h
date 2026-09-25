@@ -20,12 +20,10 @@ public:
      * @param range_offset offset for range requests
      * @param range_size size for range requests, or 0 for the whole resource
      * @param accept_gzip whether a gzip body is acceptable (whole tiles with tile_url_gz on)
-     * @param timeout_seconds how long the whole request may take, or 0 for no limit
      * @return GET_response_t with the response data and status
      */
     virtual valhalla::baldr::tile_getter_t::GET_response_t
-    get(const std::string& url, uint64_t range_offset, uint64_t range_size, bool accept_gzip,
-        double timeout_seconds) = 0;
+    get(const std::string& url, uint64_t range_offset, uint64_t range_size, bool accept_gzip) = 0;
     
     /**
      * Makes a synchronous HEAD request to fetch response headers
@@ -69,9 +67,12 @@ private:
     /// the deadline fired is how an action that gave up is told apart from one that looked
     /// and found nothing, without archaeology through internals that are not ours.
     std::atomic<bool> deadline_fired{false};
-    /// Set by the tile getter when a fetch failed for a reason other than a 404, cleared
-    /// when an action is armed. Valhalla reports that as 171 too.
-    std::atomic<bool> fetch_failed{false};
+    /// Fetches that failed other than with a 404, counted by the tile getter.
+    std::atomic<uint32_t> fetch_failures{0};
+    /// [fetch_failures] when the running action was armed.
+    uint32_t fetch_failures_at_arm = 0;
+    /// Whether a fetch failed, other than with a 404, since the running action was armed.
+    bool fetch_failed() const;
     /// Set by [cancel], cleared by [resume]. Read from the fetching thread.
     std::atomic<bool> owned_cancelled{false};
     /// Either &owned_cancelled or the caller's flag. Never null after construction.
@@ -194,8 +195,10 @@ public:
      * Measured against a dead origin on an iOS simulator with a 10 s per-request cap: 170
      * seconds, during which the app looks frozen.
      *
-     * Checked between tile fetches, and each request is capped at the time left, so a slow
-     * download can't outlast it.
+     * Checked between tile fetches, so the granularity is one request. A fetch already in
+     * flight when the deadline passes is not cancelled -- it finishes or hits its own
+     * timeout, and the next one throws. Connect and DNS stalls are the platform client's
+     * business; this bounds how many of them an action can accumulate.
      */
     void set_tile_fetch_timeout_seconds(double seconds);
 

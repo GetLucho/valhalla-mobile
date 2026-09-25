@@ -43,8 +43,7 @@ private class FakeTileClient(private val assets: AssetManager) : ValhallaHttpCli
       url: String,
       rangeOffset: Long,
       rangeSize: Long,
-      acceptGzip: Boolean,
-      timeoutMillis: Long,
+      acceptGzip: Boolean
   ): ValhallaHttpResponse {
     val path = url.substringAfter(BASE_URL)
     requests += Request(path, rangeSize, acceptGzip)
