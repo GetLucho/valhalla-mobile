@@ -144,8 +144,14 @@ public:
    *                      ownership is transferred to the wrapper. May be null,
    *                      in which case requests report FAILURE.
    * @param is_gzipped  whether valhalla stores tiles gzip-compressed
+   * @param deadline  when the running action must stop fetching, or 0; owned by the actor
+   * @param fetch_failed  set when a fetch fails other than with a 404; owned by the actor
    */
-  TileGetterWrapper(std::unique_ptr<ValhallaMobileHttpClient> http_client, bool is_gzipped): http_client(std::move(http_client)), is_gzipped(is_gzipped) {
+  TileGetterWrapper(std::unique_ptr<ValhallaMobileHttpClient> http_client, bool is_gzipped,
+                    const std::atomic<std::chrono::steady_clock::rep>* deadline,
+                    std::atomic<bool>* fetch_failed)
+      : is_gzipped(is_gzipped), deadline_(deadline), fetch_failed_(fetch_failed),
+        http_client(std::move(http_client)) {
   }
 
   GET_response_t get(const std::string& url,
@@ -163,19 +169,22 @@ public:
     }
     // A range is a slice of a remote tar, passed through as is if it's the size asked for.
     if (range_size > 0) {
-      result = http_client->get(url, range_offset, range_size, false);
-      if (result.status_ == tile_getter_t::status_code_t::SUCCESS &&
-          result.bytes_.size() != range_size) {
+      result = http_client->get(url, range_offset, range_size, false, seconds_left());
+      if (result.status_ != tile_getter_t::status_code_t::SUCCESS) {
+        fail_unless_absent(result);
+      } else if (result.bytes_.size() != range_size) {
         printf("[ValhallaActor] range of %s returned %zu bytes, not %llu\n", url.c_str(),
                result.bytes_.size(), static_cast<unsigned long long>(range_size));
+        // The server ignores Range, which a retry won't change.
         result.status_ = tile_getter_t::status_code_t::FAILURE;
       }
       return result;
     }
-    result = http_client->get(url, 0, 0, is_gzipped);
-    if (result.status_ == tile_getter_t::status_code_t::SUCCESS &&
+    result = http_client->get(url, 0, 0, is_gzipped, seconds_left());
+    if (result.status_ != tile_getter_t::status_code_t::SUCCESS ||
         !to_stored_form(url, result.bytes_)) {
       result.status_ = tile_getter_t::status_code_t::FAILURE;
+      fail_unless_absent(result);
     }
     return result;
   }
@@ -198,6 +207,30 @@ public:
   }
 
 private:
+  // Seconds left before the deadline, so a slow download can't outlast it, or 0 for none.
+  double seconds_left() const {
+    const auto limit = deadline_ ? deadline_->load(std::memory_order_relaxed) : 0;
+    if (limit == 0) {
+      return 0;
+    }
+    const auto left = std::chrono::steady_clock::duration(limit) -
+                      std::chrono::steady_clock::now().time_since_epoch();
+    return std::max(std::chrono::duration<double>(left).count(), 0.001);
+  }
+
+  // GraphReader remembers a failed tile until it's rebuilt, so only a 404 may come back as a
+  // failure. Anything else throws, after the interrupt has reported a deadline or a cancel.
+  void fail_unless_absent(const GET_response_t& result) const {
+    if (interrupt_) {
+      (*interrupt_)();
+    }
+    if (result.http_code_ == 404 || result.http_code_ == 410) {
+      return;
+    }
+    fetch_failed_->store(true, std::memory_order_relaxed);
+    throw std::runtime_error(ValhallaActor::kFetchFailedMessage);
+  }
+
   // Valhalla caches whatever it's handed, so anything but one whole tile is rejected here.
   bool to_stored_form(const std::string& url, std::vector<char>& bytes) const {
     bool ok = true;
@@ -223,6 +256,8 @@ private:
   }
 
   bool is_gzipped;
+  const std::atomic<std::chrono::steady_clock::rep>* deadline_;
+  std::atomic<bool>* fetch_failed_;
   std::unique_ptr<ValhallaMobileHttpClient> http_client;
   // Owned by GraphReader, which outlives this getter.
   const interrupt_t* interrupt_ = nullptr;
@@ -363,7 +398,8 @@ ValhallaActor::ValhallaActor(const std::string& config_path,
           mjolnir_config.get<bool>("tile_url_gz", false) &&
           tile_url.find(valhalla::baldr::GraphTile::kTilePathPattern) != std::string::npos &&
           !mjolnir_config.get<std::string>("tile_dir", std::string()).empty();
-      tile_getter = std::make_unique<TileGetterWrapper>(std::move(http_client_owned), gzipped);
+      tile_getter = std::make_unique<TileGetterWrapper>(std::move(http_client_owned), gzipped,
+                                                        &fetch_deadline, &fetch_failed);
     }
     graph_reader = std::make_unique<valhalla::baldr::GraphReader>(
       mjolnir_config, std::move(tile_getter)
@@ -477,6 +513,9 @@ std::string ValhallaActor::with_deadline(const std::function<std::string()>& act
         if (deadline_fired.load(std::memory_order_relaxed)) {
             throw TimedOut(deadline_message());
         }
+        if (fetch_failed.load(std::memory_order_relaxed)) {
+            throw std::runtime_error(kFetchFailedMessage);
+        }
         throw;
     }
     if (deadline_fired.load(std::memory_order_relaxed)) {
@@ -498,6 +537,7 @@ std::string ValhallaActor::deadline_message() const {
 
 void ValhallaActor::arm_deadline() {
     deadline_fired.store(false, std::memory_order_relaxed);
+    fetch_failed.store(false, std::memory_order_relaxed);
     const auto seconds = tile_fetch_timeout_seconds.load(std::memory_order_relaxed);
     if (seconds <= 0) {
         fetch_deadline.store(0, std::memory_order_relaxed);

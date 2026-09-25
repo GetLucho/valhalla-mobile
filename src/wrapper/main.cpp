@@ -3,6 +3,7 @@
 #include "main.h"
 #include "valhalla_actor.h"
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
@@ -220,7 +221,8 @@ public:
     }
 
     valhalla::baldr::tile_getter_t::GET_response_t
-    get(const std::string& url, uint64_t range_offset, uint64_t range_size, bool accept_gzip) override {
+    get(const std::string& url, uint64_t range_offset, uint64_t range_size, bool accept_gzip,
+        double timeout_seconds) override {
         valhalla::baldr::tile_getter_t::GET_response_t response;
         response.status_ = valhalla::baldr::tile_getter_t::status_code_t::FAILURE;
 
@@ -243,7 +245,8 @@ public:
         jobject result = env.get()->CallObjectMethod(binding->client, binding->get, j_url,
                                                      static_cast<jlong>(range_offset),
                                                      static_cast<jlong>(range_size),
-                                                     accept_gzip ? JNI_TRUE : JNI_FALSE);
+                                                     accept_gzip ? JNI_TRUE : JNI_FALSE,
+                                                     static_cast<jlong>(std::ceil(timeout_seconds * 1000)));
         if (!completed(env.get(), result)) {
             return response;
         }
@@ -356,7 +359,7 @@ public:
 
         binding.get =
             env->GetMethodID(client_class, "get",
-                             "(Ljava/lang/String;JJZ)Lcom/valhalla/valhalla/http/ValhallaHttpResponse;");
+                             "(Ljava/lang/String;JJZJ)Lcom/valhalla/valhalla/http/ValhallaHttpResponse;");
         binding.head =
             env->GetMethodID(client_class, "head",
                              "(Ljava/lang/String;I)Lcom/valhalla/valhalla/http/ValhallaHttpResponse;");

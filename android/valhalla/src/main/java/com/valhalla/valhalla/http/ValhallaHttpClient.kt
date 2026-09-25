@@ -3,6 +3,8 @@ package com.valhalla.valhalla.http
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 
 /**
@@ -39,14 +41,16 @@ internal open class ValhallaHttpClient(
    * @param rangeOffset first byte to request. Only used when [rangeSize] is positive.
    * @param rangeSize how many bytes to request; `0` asks for the whole resource.
    * @param acceptGzip whether a gzip body is acceptable (whole tiles with `tile_url_gz` on).
+   * @param timeoutMillis how long the whole request may take, or `0` for no limit.
    */
   open fun get(
       url: String,
       rangeOffset: Long,
       rangeSize: Long,
-      acceptGzip: Boolean
+      acceptGzip: Boolean,
+      timeoutMillis: Long = 0,
   ): ValhallaHttpResponse =
-      perform(url, method = "GET", headerMask = 0) { connection ->
+      perform(url, method = "GET", headerMask = 0, timeoutMillis) { connection ->
         if (rangeSize > 0) {
           // Inclusive on both ends, so the last byte is offset + size - 1.
           connection.setRequestProperty(
@@ -73,17 +77,24 @@ internal open class ValhallaHttpClient(
       url: String,
       method: String,
       headerMask: Int,
+      timeoutMillis: Long = 0,
       configure: (HttpURLConnection) -> Unit,
   ): ValhallaHttpResponse {
     var connection: HttpURLConnection? = null
+    var watchdog: ScheduledFuture<*>? = null
     return try {
-      connection =
+      val opened =
           (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = method
             connectTimeout = connectTimeoutMillis
             readTimeout = readTimeoutMillis
             configure(this)
           }
+      connection = opened
+      if (timeoutMillis > 0) {
+        // The timeouts above are per read, so a trickling body needs a cap of its own.
+        watchdog = WATCHDOG.schedule({ opened.disconnect() }, timeoutMillis, TimeUnit.MILLISECONDS)
+      }
 
       val httpCode = connection.responseCode
       if (httpCode !in HTTP_OK_RANGE) {
@@ -114,6 +125,7 @@ internal open class ValhallaHttpClient(
       // C++ caller, which has no way to handle a Java exception.
       ValhallaHttpResponse.failure()
     } finally {
+      watchdog?.cancel(false)
       connection?.disconnect()
     }
   }
@@ -123,6 +135,12 @@ internal open class ValhallaHttpClient(
     const val HEADER_LAST_MODIFIED: Int = 1
 
     private const val DEFAULT_TIMEOUT_MILLIS = 10_000
+
+    private val WATCHDOG =
+        ScheduledThreadPoolExecutor(1) {
+              Thread(it, "valhalla-tile-watchdog").apply { isDaemon = true }
+            }
+            .apply { removeOnCancelPolicy = true }
 
     private val HTTP_OK_RANGE = 200..299
   }
