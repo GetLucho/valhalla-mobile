@@ -80,7 +80,16 @@ dependencies {
     androidTestImplementation(libs.androidx.test.rules)
 }
 
-val archs = listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
+// Overridable with -Pvalhalla.abis=arm64-v8a (comma separated). The default is
+// every ABI, unchanged. A consumer targeting modern devices only, or bringing up
+// one ABI at a time, should not have to build all four -- each is a full Valhalla
+// compile, and a failure in one blocks publishing the others.
+val archs =
+    (findProperty("valhalla.abis") as String?)
+        ?.split(",")
+        ?.map { it.trim() }
+        ?.filter { it.isNotEmpty() }
+        ?: listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
 
 // Define a custom task to run the shell script
 archs.forEach { arch ->
@@ -101,16 +110,21 @@ archs.forEach { arch ->
 }
 
 tasks.named("preBuild") {
-    // Efficiently build any architecture that doesn't exist in jniLibs.
-    dependsOn("buildValhallaFor-arm64-v8a")
-    dependsOn("buildValhallaFor-armeabi-v7a")
-    dependsOn("buildValhallaFor-x86_64")
-    dependsOn("buildValhallaFor-x86")
+    // Efficiently build any architecture that doesn't exist in jniLibs. Driven by
+    // `archs` rather than listed again, so overriding it takes effect here too --
+    // otherwise a narrowed list still builds all four through this dependency.
+    archs.forEach { dependsOn("buildValhallaFor-$it") }
 }
 
 mavenPublishing {
     publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL)
-    signAllPublications()
+    // Signatures are a Maven Central requirement, not a publishing one. Signing
+    // unconditionally made `publishToMavenLocal` fail with "no configured
+    // signatory" on any machine without a GPG key -- so a contributor could not
+    // install the library locally to test a change against a real consumer.
+    if (project.findProperty("valhalla.skipSigning") != "true") {
+        signAllPublications()
+    }
 
     if (project.version.toString() === "unspecified") {
         throw IllegalArgumentException("Version must be specified")
