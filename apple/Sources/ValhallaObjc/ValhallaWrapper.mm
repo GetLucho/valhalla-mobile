@@ -185,24 +185,22 @@ namespace {
 /// envelope — they never throw.
 using ActorAction = std::string (*)(const char*, void*);
 
-/// Shared body of every action method: hand the request to the C++ wrapper and
-/// bridge the response back. Callers hold the lock; this does not.
+/// Runs one action against the actor and bridges the response back. Callers hold
+/// the lock; this does not.
 ///
 /// A null actor means the caller ran an action after `close`. Swift guards that
 /// case first, so reaching here is a bug rather than ordinary use — but the
 /// wrapper still has to answer something instead of dereferencing null, and the
 /// envelope it answers matches the Android JNI layer's wording exactly.
-NSString* PerformAction(ActorAction action,
-                        NSString* request,
-                        void* actor,
-                        const char* action_name) {
+template <typename Action>
+NSString* PerformOnActor(void* actor, const char* action_name, Action&& action) {
     if (actor == nullptr) {
         return [NSString stringWithFormat:
                 @"{\"code\":-1,\"message\":\"the actor is closed, cannot run %s\"}",
                 action_name];
     }
 
-    std::string result = action([request UTF8String], actor);
+    std::string result = action(actor);
 
     // Swift imports this return as implicitly unwrapped, so a nil would trap in
     // the host app. Invalid UTF-8 answers the wrapper's error envelope instead.
@@ -211,6 +209,16 @@ NSString* PerformAction(ActorAction action,
                                                 encoding:NSUTF8StringEncoding];
 
     return response ?: @"{\"code\":-1,\"message\":\"response was not valid UTF-8\"}";
+}
+
+/// Shared body of every action method that takes a request.
+NSString* PerformAction(ActorAction action,
+                        NSString* request,
+                        void* actor,
+                        const char* action_name) {
+    return PerformOnActor(actor, action_name, [&](void* actor) {
+        return action([request UTF8String], actor);
+    });
 }
 
 } // namespace
@@ -291,6 +299,38 @@ NSString* PerformAction(ActorAction action,
 {
     @synchronized(self) {
         return PerformAction(&matrix, request, _actor, "sources_to_targets");
+    }
+}
+
+- (NSArray<NSDictionary*>*)tilesCoveringLatitude:(double)latitude longitude:(double)longitude
+{
+    @synchronized(self) {
+        if (_actor == nullptr) {
+            return @[];
+        }
+        auto* actor = static_cast<ValhallaActor*>(_actor);
+        NSMutableArray<NSDictionary*>* covering = [NSMutableArray array];
+        try {
+            for (const auto& ref : actor->tiles_covering(latitude, longitude)) {
+                [covering addObject:@{
+                    @"level" : @(ref.level),
+                    @"id" : @(ref.id),
+                    @"path" : [NSString stringWithUTF8String:ref.path.c_str()],
+                }];
+            }
+        } catch (...) {
+            return @[];
+        }
+        return covering;
+    }
+}
+
+- (NSString*)ensureTileCachedAtLevel:(uint32_t)level tileId:(uint32_t)tileId
+{
+    @synchronized(self) {
+        return PerformOnActor(_actor, "ensure_tile_cached", [&](void* actor) {
+            return ensure_tile_cached(level, tileId, actor);
+        });
     }
 }
 

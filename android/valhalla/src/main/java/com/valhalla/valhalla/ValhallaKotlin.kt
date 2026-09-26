@@ -36,6 +36,15 @@ internal class ValhallaKotlin {
 
   external fun matrix(handle: Long, request: ByteArray): ByteArray
 
+  /** The tiles covering a coordinate, as a JSON array of {level, id, path}. */
+  external fun tilesCovering(handle: Long, latitude: Double, longitude: Double): ByteArray
+
+  /**
+   * Fetch one tile into `mjolnir.tile_dir` if it is not already there. `true` or `false` as JSON,
+   * or the error envelope.
+   */
+  external fun ensureTileCached(handle: Long, level: Int, tileId: Int): ByteArray
+
   /** Set or clear the cancel flag on the HANDLE, which outlives any one actor. */
   external fun setCancelled(handle: Long, cancelled: Boolean)
 }
