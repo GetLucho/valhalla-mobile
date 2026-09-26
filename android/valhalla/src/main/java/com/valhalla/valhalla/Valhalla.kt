@@ -335,6 +335,12 @@ internal constructor(
     return rawResponse
   }
 
+  /** Ask the action running now to stop at its next tile fetch. Sticky until [resume]. */
+  fun cancel() = valhallaActor.cancel()
+
+  /** Clear a previous [cancel] so further actions can run. */
+  fun resume() = valhallaActor.resume()
+
   /**
    * Release the native actor held by this instance. Safe to call more than once.
    *
