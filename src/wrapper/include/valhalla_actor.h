@@ -1,6 +1,10 @@
 #ifndef VALHALLAACTOR_H
 #define VALHALLAACTOR_H
 
+#include <atomic>
+#include <chrono>
+#include <functional>
+#include <stdexcept>
 #include <string>
 #include <valhalla/tyr/actor.h>
 #include <valhalla/baldr/tilegetter.h>
@@ -46,8 +50,112 @@ class ValhallaActor {
 private:
     std::unique_ptr<valhalla::tyr::actor_t> actor;
     std::unique_ptr<valhalla::baldr::GraphReader> graph_reader;
+
+    /// Seconds an action may spend fetching tiles, or 0 for no limit.
+    std::atomic<double> tile_fetch_timeout_seconds{0.0};
+    /// When the action running now must stop fetching. Steady, so a clock change cannot
+    /// move it. Set at the start of every action and read from the fetching thread.
+    std::atomic<std::chrono::steady_clock::rep> fetch_deadline{0};
+    /// Installed on the GraphReader once, and held here because it stores the pointer.
+    std::function<void()> interrupt;
+    /// Set by the interrupt when it fires, cleared when an action is armed.
+    ///
+    /// The exception the interrupt throws does not reach the caller: somewhere in the fetch
+    /// path valhalla catches it, and loki then reports "No suitable edges near location"
+    /// (error 171) -- the same answer a genuinely unroutable address gives. Recording that
+    /// the deadline fired is how an action that gave up is told apart from one that looked
+    /// and found nothing, without archaeology through internals that are not ours.
+    std::atomic<bool> deadline_fired{false};
+    /// Fetches that failed other than with a 404 or 410, counted by the tile getter.
+    std::atomic<uint32_t> fetch_failures{0};
+    /// [fetch_failures] when the running action was armed.
+    uint32_t fetch_failures_at_arm = 0;
+    /// Whether a fetch failed, other than with a 404 or 410, since the running action was armed.
+    bool fetch_failed() const;
+    /// Set by [cancel], cleared by [resume]. Read from the fetching thread.
+    std::atomic<bool> owned_cancelled{false};
+    /// Either &owned_cancelled or the caller's flag. Never null after construction.
+    std::atomic<bool>* cancelled = &owned_cancelled;
+
+    /// Arm the deadline for an action about to run, then run it.
+    std::string with_deadline(const std::function<std::string()>& action);
+
+    /// Arm the deadline without running anything, for callers that are not string actions.
+    void arm_deadline();
+
+    /// Why the action gave up, for the exception message.
+    std::string deadline_message() const;
+
 public:
-    ValhallaActor(const std::string& config_path, ValhallaMobileHttpClient* http_client = nullptr);
+    /**
+     * @param cancel_flag  optional, and NOT owned. When given, [cancel] and [resume] set it
+     *                     and the interrupt reads it, so a caller can stop a running action
+     *                     without touching this object -- which matters because every other
+     *                     method holds a lock for its duration, and an actor being freed
+     *                     concurrently would otherwise leave cancel reading a dangling
+     *                     pointer. It must outlive this actor.
+     */
+    ValhallaActor(const std::string& config_path,
+                  ValhallaMobileHttpClient* http_client = nullptr,
+                  std::atomic<bool>* cancel_flag = nullptr);
+
+    /// The exact text [TimedOut] carries when the deadline elapsed.
+    ///
+    /// Fixed, and part of the contract: it is the only signal that survives the trip out to
+    /// Swift and Kotlin, so a caller matches on it to tell "the origin is gone" from "this
+    /// route does not exist".
+    static constexpr const char* kTimedOutMessage = "valhalla-mobile: tile fetch deadline";
+
+    /// The exact text [TimedOut] carries when [cancel] was called.
+    static constexpr const char* kCancelledMessage = "valhalla-mobile: cancelled";
+    /// The exact text of the error when a tile fetch failed, other than with a 404 or 410.
+    static constexpr const char* kFetchFailedMessage = "valhalla-mobile: tile fetch failed";
+
+    /// Raised when an action gave up because [set_tile_fetch_timeout_seconds] elapsed.
+    ///
+    /// A distinct type so a caller can tell "the origin is slow or gone" from "this route
+    /// does not exist", which otherwise both surface as a generic failure.
+    class TimedOut : public std::runtime_error {
+    public:
+        explicit TimedOut(const std::string& what) : std::runtime_error(what) {}
+    };
+
+    /// Raised when an action stopped because [cancel] was called.
+    class Cancelled : public std::runtime_error {
+    public:
+        explicit Cancelled(const std::string& what) : std::runtime_error(what) {}
+    };
+
+    /**
+     * Ask the action running now to stop at its next tile fetch.
+     *
+     * Checked in the same place as the deadline, so the granularity is one request: a fetch
+     * already in flight finishes or hits its own timeout. Sticky until [resume] clears it,
+     * because a cancel that raced ahead of the action it meant to stop would be ignored.
+     */
+    void cancel();
+
+    /// Clear a previous [cancel] so further actions can run.
+    void resume();
+
+    /**
+     * Bound how long an action may spend fetching tiles. 0, the default, is no limit.
+     *
+     * Normally set from `mjolnir.tile_url_timeout` in the config rather than called; this
+     * exists for a caller that needs to change it after construction.
+     *
+     * This is not the same as an HTTP timeout and does not replace one. A platform client
+     * gives up on a request after 10 s without data; one route attempts tile after tile,
+     * each paying that in turn. Measured against a dead origin on an iOS simulator: 170
+     * seconds, during which the app looks frozen. A download that keeps trickling is
+     * bounded only by the link.
+     *
+     * Checked between tile fetches, so the granularity is one request. A fetch already in
+     * flight when the deadline passes is not cancelled -- it finishes or hits its own
+     * timeout, and the next one throws. Connect and DNS stalls are the platform client's
+     * business; this bounds how many of them an action can accumulate.
+     */
+    void set_tile_fetch_timeout_seconds(double seconds);
 
     /**
      * Compute a route between the given locations. This is Valhalla's `route`
