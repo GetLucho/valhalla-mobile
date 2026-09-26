@@ -8,6 +8,8 @@
 @interface ValhallaWrapper : NSObject {
     @private
     void* _actor;
+    /// std::atomic<bool>*, owned here and freed in dealloc. See `cancel`.
+    void* _cancelFlag;
 }
 
 - (instancetype)initWithConfigPath:(NSString*)config_path error:(__autoreleasing NSError **)error;
@@ -33,6 +35,12 @@
 /// Samples terrain heights under a shape, from the configured elevation tiles.
 /// @param request a `height` request as JSON.
 - (NSString*)height:(NSString*)request;
+
+/// Asks the action running now to stop at its next tile fetch. Sticky until `resume`.
+- (void)cancel;
+
+/// Clears a previous `cancel` so further actions can run.
+- (void)resume;
 
 /// Computes a matrix of costs and times between every source and every target.
 /// @param request a `sources_to_targets` request as JSON.
