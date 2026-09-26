@@ -61,6 +61,11 @@ fi
 platform=""
 arch=""
 clean=false
+# Never assigned before, and `if $clean_all` takes the TRUE branch when the
+# variable is empty -- so every invocation ran `rm -rf build`, whatever was asked
+# for. Building either platform destroyed the other's artifacts, and `clean` was
+# indistinguishable from not passing it.
+clean_all=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
