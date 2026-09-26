@@ -29,6 +29,10 @@ public protocol ValhallaProviding {
 
     func matrix(rawRequest: String) throws -> String
 
+    func tilesCovering(latitude: Double, longitude: Double) throws -> [TileRef]
+
+    func ensureTileCached(level: UInt32, id: UInt32) throws -> Bool
+
     func cancel()
 
     func resume()
@@ -253,6 +257,41 @@ public final class Valhalla: ValhallaProviding {
         try checkForError(try withActor { $0.matrix(request) })
     }
 
+    /// The tiles covering a coordinate, one per hierarchy level.
+    ///
+    /// From `TileHierarchy::levels()` and `GraphTile::FileSuffix`, so a consumer needs no copy
+    /// of the grid arithmetic -- which is the point: hand-maintained ports of it have already
+    /// drifted more than once.
+    ///
+    /// - Returns: empty for a coordinate that is not on the planet.
+    /// - Throws: ``ValhallaError/closed`` after ``close()``.
+    public func tilesCovering(latitude: Double, longitude: Double) throws -> [TileRef] {
+        let entries = try withActor { $0.tilesCovering(latitude: latitude, longitude: longitude) }
+        var refs: [TileRef] = []
+        refs.reserveCapacity(entries.count)
+        for entry in entries {
+            // NSNumber, not UInt32: the bridge boxes both integers, and a direct `as? UInt32`
+            // fails for a value the dictionary stores as a wider type.
+            guard let level = entry["level"] as? NSNumber,
+                let id = entry["id"] as? NSNumber,
+                let path = entry["path"] as? String
+            else { continue }
+            refs.append(TileRef(level: level.uint32Value, id: id.uint32Value, path: path))
+        }
+        return refs
+    }
+
+    /// Ensures one tile is in `mjolnir.tile_dir`, fetching it through Valhalla if it is not.
+    ///
+    /// - Returns: `false` for a tile the origin does not have, which is normal coverage rather
+    ///   than a failure -- two of the sixteen level-2 tiles over Lake and Porter counties are
+    ///   Lake Michigan.
+    /// - Throws: ``ValhallaError/valhallaError(_:_:)`` when the fetch was cancelled, hit the
+    ///   deadline, or failed.
+    public func ensureTileCached(level: UInt32, id: UInt32) throws -> Bool {
+        try checkForError(try withActor { $0.ensureTileCached(level: level, id: id) }) == "true"
+    }
+
     /// Asks the action running now to stop at its next tile fetch. Sticky until ``resume()``.
     ///
     /// Deliberately does not take ``lock``: every other method holds it for the duration of the
@@ -335,5 +374,24 @@ public final class Valhalla: ValhallaProviding {
         }
 
         throw ValhallaError.valhallaError(code, message)
+    }
+}
+
+/// One tile of the hierarchy: what to ask the CDN for, and what to fetch.
+public struct TileRef: Equatable, Sendable {
+    /// Hierarchy level. 0 is 4 degrees, 1 is 1 degree, 2 is 0.25 degrees.
+    public let level: UInt32
+    /// Tile id within that level.
+    public let id: UInt32
+    /// What `mjolnir.tile_url`'s `{tilePath}` is replaced with, e.g. `2/000/818/660.gph`.
+    ///
+    /// Always the uncompressed name. With `tile_url_gz` on the CACHED file is `.gph.gz`, but
+    /// `CacheTileURL` builds the fetch name from the plain suffix, so the two differ on purpose.
+    public let path: String
+
+    public init(level: UInt32, id: UInt32, path: String) {
+        self.level = level
+        self.id = id
+        self.path = path
     }
 }

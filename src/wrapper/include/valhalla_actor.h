@@ -6,6 +6,7 @@
 #include <functional>
 #include <stdexcept>
 #include <string>
+#include <vector>
 #include <valhalla/tyr/actor.h>
 #include <valhalla/baldr/tilegetter.h>
 
@@ -119,6 +120,50 @@ public:
     public:
         explicit TimedOut(const std::string& what) : std::runtime_error(what) {}
     };
+
+    /// One tile of the hierarchy: what to ask the CDN for, and what to fetch.
+    struct TileRef {
+        /// Hierarchy level. 0 is 4 degrees, 1 is 1 degree, 2 is 0.25 degrees.
+        uint32_t level = 0;
+        /// Tile id within that level.
+        uint32_t id = 0;
+        /// The path `mjolnir.tile_url`'s {tilePath} is replaced with, e.g. "2/000/818/660.gph".
+        ///
+        /// Always the uncompressed name. With `tile_url_gz` on the CACHED file is .gph.gz,
+        /// but the URL is unchanged -- CacheTileURL builds the fetch name from the plain
+        /// suffix, so the two differ deliberately.
+        std::string path;
+    };
+
+    /**
+     * The tiles covering one coordinate, one per hierarchy level.
+     *
+     * From `TileHierarchy::levels()` and `GraphTile::FileSuffix`, which is the point: three
+     * hand-maintained ports of this arithmetic had already drifted twice -- a NaN guard wrong
+     * in exactly one of them, and a bounds rule that dropped the poles in two. Reading it from
+     * the engine that defines it makes drift impossible by construction rather than by three
+     * test suites kept in step by eye.
+     *
+     * The path carries the suffix the CONFIG asks for, so it matches what the cache stores.
+     */
+    std::vector<TileRef> tiles_covering(double latitude, double longitude) const;
+
+    /**
+     * Ensure one tile is in `mjolnir.tile_dir`, fetching it if it is not.
+     *
+     * This is the prefetch, and it deliberately does no downloading of its own: it calls
+     * `GraphReader::GetGraphTile`, so a prefetched tile arrives through exactly the path a
+     * route would have used -- same cache, same naming, same gzip handling, same id.txt and
+     * rebuild detection. A second downloader would be a second set of all of those.
+     *
+     * @return true when the tile is now cached, false when the origin does not have it.
+     *         Throws on a deadline, a cancel, or a fetch that failed other than with a 404 or 410.
+     *
+     * A false is normal and is not an error: two of the sixteen level-2 tiles over Lake and
+     * Porter counties are Lake Michigan. A prefetch that treated a miss as failure could not
+     * prepare any coastal or border region.
+     */
+    bool ensure_tile_cached(uint32_t level, uint32_t id);
 
     /// Raised when an action stopped because [cancel] was called.
     class Cancelled : public std::runtime_error {

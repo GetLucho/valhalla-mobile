@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -18,10 +19,13 @@
 #include <boost/property_tree/ptree.hpp>
 #include <valhalla/tyr/actor.h>
 #include <valhalla/baldr/compression_utils.h>
+#include <valhalla/baldr/graphid.h>
 #include <valhalla/baldr/graphtile.h>
 #include <valhalla/baldr/graphtileheader.h>
 #include <valhalla/baldr/rapidjson_utils.h>
+#include <valhalla/baldr/tilehierarchy.h>
 #include <valhalla/loki/worker.h>
+#include <valhalla/midgard/pointll.h>
 #include "valhalla_actor.h"
 
 namespace {
@@ -465,6 +469,54 @@ void ValhallaActor::cancel() {
 
 void ValhallaActor::resume() {
     cancelled->store(false, std::memory_order_relaxed);
+}
+
+std::vector<ValhallaActor::TileRef> ValhallaActor::tiles_covering(double latitude,
+                                                                 double longitude) const {
+    std::vector<TileRef> covering;
+    // A coordinate off the planet has no tiles rather than a wrong one. PointLL would
+    // happily construct and TileId would return an index into nothing.
+    if (!std::isfinite(latitude) || !std::isfinite(longitude) || latitude < -90.0 ||
+        latitude > 90.0 || longitude < -180.0 || longitude > 180.0) {
+      return covering;
+    }
+
+    const valhalla::midgard::PointLL point{longitude, latitude};
+    // What a tile is called when REQUESTED, which is not what it is called on disk.
+    // With tile_url_gz on, GraphTile::store() writes .gph.gz (graphtile.cc:211-218), but
+    // CacheTileURL builds the fetch name from the plain suffix -- the URL does not change.
+    // So this is always the uncompressed name, and the cached name is valhalla's business.
+    const std::string suffix = valhalla::baldr::SUFFIX_NON_COMPRESSED;
+    for (const auto& level : valhalla::baldr::TileHierarchy::levels()) {
+      TileRef ref;
+      ref.level = level.level;
+      ref.id = static_cast<uint32_t>(level.tiles.TileId(point));
+      ref.path = valhalla::baldr::GraphTile::FileSuffix(
+          valhalla::baldr::GraphId(ref.id, ref.level, 0), suffix, &level);
+      covering.push_back(ref);
+    }
+    return covering;
+}
+
+bool ValhallaActor::ensure_tile_cached(uint32_t level, uint32_t id) {
+    // Armed like any other action, so the deadline and cancel both apply. No deep stack:
+    // that exists for the map matcher's unbounded recursion, and this is one fetch.
+    arm_deadline();
+    // GetGraphTile, not a download of our own: a prefetched tile arrives through exactly
+    // the path a route would have used, so there is one cache, one naming rule, one gzip
+    // decision and one rebuild check rather than two of each.
+    const valhalla::baldr::GraphId graphid(id, level, 0);
+    const bool cached = static_cast<bool>(graph_reader->GetGraphTile(graphid));
+    // Same reason as with_deadline: the interrupt throws and valhalla swallows it, so a tile
+    // abandoned on the deadline would otherwise look identical to one the origin does not
+    // have -- and for a prefetch those mean opposite things.
+    if (deadline_fired.load(std::memory_order_relaxed)) {
+        throw TimedOut(deadline_message());
+    }
+    if (!cached && fetch_failed()) {
+        throw std::runtime_error(kFetchFailedMessage);
+    }
+    return cached;
 }
 
 bool ValhallaActor::fetch_failed() const {
