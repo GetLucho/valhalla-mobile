@@ -65,6 +65,8 @@ std::string trace_route(const char *request, void* actor);
 std::string trace_attributes(const char *request, void* actor);
 std::string height(const char *request, void* actor);
 std::string matrix(const char *request, void* actor);
+/// `true` or `false`, or the error envelope.
+std::string ensure_tile_cached(uint32_t level, uint32_t tile_id, void* actor);
 /// @param cancel_flag  optional, NOT owned, and must outlive the actor. See ValhallaActor.
 void* create_valhalla_actor(const char *config_path,
                             ValhallaMobileHttpClient* http_client = nullptr,
