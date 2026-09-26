@@ -97,6 +97,8 @@ bool gunzip(const std::vector<char>& gzip, std::vector<char>& out) {
             }
             size = std::min(claimed + 1, std::max(done * 2, gzip.size() * 4));
         }
+        // resize alone can round capacity up to twice the old one.
+        out.reserve(size);
         out.resize(size);
         s.next_out = reinterpret_cast<Bytef*>(out.data() + done);
         s.avail_out = static_cast<uInt>(size - done);
@@ -226,10 +228,11 @@ private:
       ok = false;
     } else if (is_gzipped) {
       std::vector<char> gzip;
-      ok = gzip_tile(bytes, gzip);
-      if (ok) {
-        bytes.swap(gzip);
+      if (!gzip_tile(bytes, gzip)) {
+        printf("[ValhallaActor] could not compress tile %s\n", url.c_str());
+        return false;
       }
+      bytes.swap(gzip);
     }
     if (!ok) {
       printf("[ValhallaActor] tile %s is not one whole tile\n", url.c_str());
