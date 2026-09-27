@@ -82,6 +82,22 @@ include_directories(${Date_INCLUDE_DIRS})
 
 add_subdirectory(valhalla)
 
+# Valhalla 3.9.0's flatbush doesn't compile where size_t is 32 bits, since
+# `auto wNodeIndex = mBoxes.size() - 1UL` is then unsigned long and std::min gets two types.
+# Loki builds against a copy with chusitoo/flatbush#15 until valhalla picks it up.
+# See https://github.com/Rallista/valhalla-mobile/issues/115.
+set(flatbush_header ${CMAKE_CURRENT_SOURCE_DIR}/valhalla/third_party/flatbush/flatbush.h)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${flatbush_header})
+file(READ ${flatbush_header} flatbush_source)
+string(REPLACE "auto wNodeIndex = mBoxes.size() - 1UL" "size_t wNodeIndex = mBoxes.size() - 1UL"
+       flatbush_fixed "${flatbush_source}")
+if(flatbush_fixed STREQUAL flatbush_source)
+    message(WARNING "flatbush no longer needs the 32-bit fix in ${CMAKE_CURRENT_LIST_FILE}")
+else()
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/flatbush-fixed/flatbush.h "${flatbush_fixed}")
+    target_include_directories(valhalla-loki BEFORE PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/flatbush-fixed)
+endif()
+
 # Valhalla source directory
 set(VALHALLA_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/valhalla)
 set_property(DIRECTORY valhalla PROPERTY VALHALLA_SOURCE_DIR ${VALHALLA_SOURCE_DIR})
