@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <exception>
 #include <limits>
 #include <memory>
@@ -270,6 +271,25 @@ public:
     retry_.clear();
   }
 
+  /// Whether a tile is in tile_dir, gzipped or not, when fetched tiles are written there:
+  /// there is a tile_dir, and no tile extract, which valhalla would read instead. Valhalla
+  /// writes each tile to a temporary file and renames it, so a tile that is there is whole.
+  bool stored(const valhalla::baldr::GraphId& graphid) const {
+    if (tile_dir_.empty() || !tile_extract_->tiles.empty()) {
+      return false;
+    }
+    for (const auto& suffix :
+         {valhalla::baldr::SUFFIX_NON_COMPRESSED, valhalla::baldr::SUFFIX_COMPRESSED}) {
+      std::error_code error;
+      if (std::filesystem::exists(std::filesystem::path(tile_dir_) /
+                                      valhalla::baldr::GraphTile::FileSuffix(graphid, suffix),
+                                  error)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
 private:
   const std::atomic<uint32_t>* failures_;
   std::vector<valhalla::baldr::GraphId> retry_;
@@ -493,11 +513,23 @@ bool ValhallaActor::ensure_tile_cached(uint32_t level, uint32_t id) {
     // Armed like any other action, so the deadline and cancel both apply. No deep stack:
     // that exists for the map matcher's unbounded recursion, and this is one fetch.
     arm_deadline();
+    // The reader is always a RetryingGraphReader; see the constructor.
+    auto& reader = static_cast<RetryingGraphReader&>(*graph_reader);
+    const valhalla::baldr::GraphId graphid(id, level, 0);
+    // Done already, and reading the tile would only load it into memory.
+    if (reader.stored(graphid)) {
+        return true;
+    }
     // GetGraphTile, not a download of our own: a prefetched tile arrives through exactly
     // the path a route would have used, so there is one cache, one naming rule, one gzip
     // decision and one rebuild check rather than two of each.
-    const valhalla::baldr::GraphId graphid(id, level, 0);
-    const bool cached = static_cast<bool>(graph_reader->GetGraphTile(graphid));
+    const bool cached = static_cast<bool>(reader.GetGraphTile(graphid));
+    // GetGraphTile also keeps the tile in memory, and FlatTileCache::Put never evicts: only an
+    // action's cleanup trims it, once it passes max_cache_size. Without this, prefetching a
+    // region would hold all of it in memory until the next route.
+    if (reader.OverCommitted()) {
+        reader.Trim();
+    }
     // Same reason as with_deadline: the interrupt throws and valhalla swallows it, so a tile
     // abandoned on the deadline would otherwise look identical to one the origin does not
     // have -- and for a prefetch those mean opposite things.
