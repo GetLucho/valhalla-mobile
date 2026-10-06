@@ -63,16 +63,21 @@ private:
 
     /// Seconds an action may spend fetching tiles, or 0 for no limit.
     std::atomic<double> tile_fetch_timeout_seconds{0.0};
-    /// When the action running now must stop fetching. Steady, so a clock change cannot
-    /// move it. Set at the start of every action and read from the fetching thread.
-    std::atomic<std::chrono::steady_clock::rep> fetch_deadline{0};
-    /// Set by the interrupt when it fires, cleared when an action is armed.
+    /// How long the running action may spend fetching, in steady_clock ticks, or 0 for no
+    /// limit. Set at the start of every action.
+    std::atomic<std::chrono::steady_clock::rep> fetch_budget{0};
+    /// How long the running action has spent fetching so far. The tile getter adds each
+    /// request's time to it, and an action's path search is not counted: a long search
+    /// that needs one more tile at its end still gets it.
+    std::atomic<std::chrono::steady_clock::rep> fetch_time{0};
+    /// Set by [interrupt] or [before_fetch] when it stops an action, cleared when one is
+    /// armed.
     ///
-    /// The exception the interrupt throws does not reach the caller: somewhere in the fetch
-    /// path valhalla catches it, and loki then reports "No suitable edges near location"
+    /// The exception they throw does not always reach the caller: loki catches anything a
+    /// tile fetch throws during its search and reports "No suitable edges near location"
     /// (error 171) -- the same answer a genuinely unroutable address gives. Recording that
-    /// the deadline fired is how an action that gave up is told apart from one that looked
-    /// and found nothing, without archaeology through internals that are not ours.
+    /// it fired is how an action that gave up is told apart from one that looked and found
+    /// nothing.
     std::atomic<bool> deadline_fired{false};
     /// Fetches that failed other than with a 404 or 410, counted by the tile getter.
     std::atomic<uint32_t> fetch_failures{0};

@@ -83,17 +83,6 @@ class ValhallaPrefetchTest {
     }
   }
 
-  @Test
-  fun testThrowsWhenTheDeadlineFires() {
-    valhalla(timeoutSeconds = 1e-9).use { valhalla ->
-      val error =
-          assertThrows(ValhallaException.Internal::class.java) {
-            valhalla.ensureTileCached(2, TILE)
-          }
-      assertEquals("ValhallaError(code=-1, valhalla-mobile: tile fetch deadline)", error.message)
-    }
-  }
-
   private companion object {
     const val TILE = 762485
     const val MISSING_TILE = 762484

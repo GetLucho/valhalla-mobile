@@ -138,9 +138,10 @@ public:
    * its own timeout in turn. The check between fetches is what bounds it.
    */
   TileGetterWrapper(std::unique_ptr<ValhallaMobileHttpClient> http_client, bool is_gzipped,
-                    std::atomic<uint32_t>* failures, const std::function<void()>* before_fetch)
+                    std::atomic<uint32_t>* failures, const std::function<void()>* before_fetch,
+                    std::atomic<std::chrono::steady_clock::rep>* fetch_time)
       : is_gzipped(is_gzipped), failures_(failures), before_fetch_(before_fetch),
-        http_client(std::move(http_client)) {
+        fetch_time_(fetch_time), http_client(std::move(http_client)) {
   }
 
   GET_response_t get(const std::string& url,
@@ -151,6 +152,7 @@ public:
     if (*before_fetch_) {
       (*before_fetch_)();
     }
+    const FetchTimer timer{fetch_time_};
     GET_response_t result;
     if (!http_client) {
       result.status_ = tile_getter_t::status_code_t::FAILURE;
@@ -186,6 +188,7 @@ public:
     if (*before_fetch_) {
       (*before_fetch_)();
     }
+    const FetchTimer timer{fetch_time_};
     HEAD_response_t result;
     if (http_client) { 
         result = http_client->head(url, header_mask);
@@ -200,6 +203,16 @@ public:
   }
 
 private:
+  /// Adds the time one request takes, however it returns, to the action's fetch time.
+  struct FetchTimer {
+    std::atomic<std::chrono::steady_clock::rep>* total;
+    std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
+    ~FetchTimer() {
+      total->fetch_add((std::chrono::steady_clock::now() - started).count(),
+                       std::memory_order_relaxed);
+    }
+  };
+
   // Anything but a 404 or 410 may be the connection, so RetryingGraphReader lets the next action
   // retry it.
   void count_failure(const GET_response_t& result) const {
@@ -237,6 +250,7 @@ private:
   bool is_gzipped;
   std::atomic<uint32_t>* failures_;
   const std::function<void()>* before_fetch_;
+  std::atomic<std::chrono::steady_clock::rep>* fetch_time_;
   std::unique_ptr<ValhallaMobileHttpClient> http_client;
 };
 
@@ -434,7 +448,8 @@ ValhallaActor::ValhallaActor(const std::string& config_path,
         printf("[ValhallaActor] tile_url_gz is ignored for a tar tile_url or without a tile_dir\n");
       }
       tile_getter = std::make_unique<TileGetterWrapper>(std::move(http_client_owned), gzipped,
-                                                        &fetch_failures, &before_fetch);
+                                                        &fetch_failures, &before_fetch,
+                                                        &fetch_time);
     }
     graph_reader = std::make_unique<RetryingGraphReader>(
       mjolnir_config, std::move(tile_getter), &fetch_failures
@@ -463,8 +478,8 @@ ValhallaActor::ValhallaActor(const std::string& config_path,
     before_fetch = [this]() {
       // Cancellation first: a user who pressed stop should not wait out the deadline.
       interrupt();
-      const auto limit = fetch_deadline.load(std::memory_order_relaxed);
-      if (limit != 0 && std::chrono::steady_clock::now().time_since_epoch().count() > limit) {
+      const auto budget = fetch_budget.load(std::memory_order_relaxed);
+      if (budget != 0 && fetch_time.load(std::memory_order_relaxed) > budget) {
         deadline_fired.store(true, std::memory_order_relaxed);
         throw TimedOut(kTimedOutMessage);
       }
@@ -530,9 +545,9 @@ bool ValhallaActor::ensure_tile_cached(uint32_t level, uint32_t id) {
     if (reader.OverCommitted()) {
         reader.Trim();
     }
-    // Same reason as with_deadline: the interrupt throws and valhalla swallows it, so a tile
-    // abandoned on the deadline would otherwise look identical to one the origin does not
-    // have -- and for a prefetch those mean opposite things.
+    // A cancel throws out of GetGraphTile here, and nothing on this path catches it. The
+    // check stays so a stop is never mistaken for a tile the origin does not have, which for
+    // a prefetch mean opposite things.
     if (deadline_fired.load(std::memory_order_relaxed)) {
         throw TimedOut(deadline_message());
     }
@@ -590,16 +605,17 @@ void ValhallaActor::arm_deadline() {
     fetch_failures_at_arm = fetch_failures.load(std::memory_order_relaxed);
     // The reader is always a RetryingGraphReader; see the constructor.
     static_cast<RetryingGraphReader&>(*graph_reader).forget_failures();
+    // Per action, not per construction: the budget is "this route may spend N seconds
+    // fetching", not "this engine may spend N seconds in its lifetime".
+    fetch_time.store(0, std::memory_order_relaxed);
     const auto seconds = tile_fetch_timeout_seconds.load(std::memory_order_relaxed);
     if (seconds <= 0) {
-        fetch_deadline.store(0, std::memory_order_relaxed);
+        fetch_budget.store(0, std::memory_order_relaxed);
     } else {
-        // Armed per action, not per construction: the budget is "this route may spend N
-        // seconds", not "this engine may spend N seconds in its lifetime".
-        const auto now = std::chrono::steady_clock::now().time_since_epoch();
         const auto budget = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
             std::chrono::duration<double>(seconds));
-        fetch_deadline.store((now + budget).count(), std::memory_order_relaxed);
+        fetch_budget.store(std::max<std::chrono::steady_clock::rep>(budget.count(), 1),
+                           std::memory_order_relaxed);
     }
 }
 

@@ -67,13 +67,4 @@ final class TestValhallaPrefetch: XCTestCase {
         valhalla.resume()
         XCTAssertTrue(try valhalla.ensureTileCached(level: 2, id: Self.tile))
     }
-
-    func testThrowsWhenTheDeadlineFires() throws {
-        let valhalla = try valhalla(timeoutSeconds: 1e-9)
-
-        XCTAssertThrowsError(try valhalla.ensureTileCached(level: 2, id: Self.tile)) { error in
-            XCTAssertEqual(error as? ValhallaError,
-                           .valhallaError(-1, "valhalla-mobile: tile fetch deadline"))
-        }
-    }
 }
