@@ -123,35 +123,23 @@ bool gzip_tile(const std::vector<char>& plain, std::vector<char>& out) {
 class TileGetterWrapper : public valhalla::baldr::tile_getter_t {
 public:
   /**
-   * Honour the interrupt GraphReader installs.
-   *
-   * tile_getter_t::set_interrupt has an EMPTY default body, so a getter that does not
-   * override it makes GraphReader::SetInterrupt silently do nothing -- the call succeeds,
-   * the callback is stored, and it is never invoked. That is what this class did.
-   *
-   * It matters because an HTTP timeout does not bound the operation. Both platform
-   * clients give up on a request after 10 s without data, and a route against a dead
-   * origin still took 170 seconds measured on an iOS simulator: one route attempts tile
-   * after tile, each paying its own timeout in turn. Bounding the whole operation needs a
-   * check between fetches, which is exactly what this is.
-   *
-   * The interrupt is a std::function<void()> that THROWS to abort; see
-   * curl_tilegetter.h, where the same pointer reaches libcurl's progress callback.
-   */
-  void set_interrupt(const interrupt_t* interrupt) override {
-    interrupt_ = interrupt;
-  }
-
-  /**
    * @param http_client  client used to perform HTTP GET/HEAD tile requests;
    *                      ownership is transferred to the wrapper. May be null,
    *                      in which case requests report FAILURE.
    * @param is_gzipped  whether valhalla stores tiles gzip-compressed
    * @param failures  counts fetches that fail other than with a 404 or 410; owned by the actor
+   * @param before_fetch  run before every request once it is set, and throws to stop the
+   *                      action: the cancel flag, then the deadline. Owned by the actor.
+   *
+   * An HTTP timeout does not bound the operation. Both platform clients give up on a
+   * request after 10 s without data, and a route against a dead origin still took 170
+   * seconds measured on an iOS simulator: one route attempts tile after tile, each paying
+   * its own timeout in turn. The check between fetches is what bounds it.
    */
   TileGetterWrapper(std::unique_ptr<ValhallaMobileHttpClient> http_client, bool is_gzipped,
-                    std::atomic<uint32_t>* failures)
-      : is_gzipped(is_gzipped), failures_(failures), http_client(std::move(http_client)) {
+                    std::atomic<uint32_t>* failures, const std::function<void()>* before_fetch)
+      : is_gzipped(is_gzipped), failures_(failures), before_fetch_(before_fetch),
+        http_client(std::move(http_client)) {
   }
 
   GET_response_t get(const std::string& url,
@@ -159,8 +147,8 @@ public:
                      const uint64_t range_size = 0) override {
     // Before the request, not after: the point is to stop paying for fetches once the
     // caller has given up, and a check that runs only afterwards still pays for this one.
-    if (interrupt_) {
-      (*interrupt_)();
+    if (*before_fetch_) {
+      (*before_fetch_)();
     }
     GET_response_t result;
     if (!http_client) {
@@ -194,8 +182,8 @@ public:
   }
 
   HEAD_response_t head(const std::string& url, header_mask_t header_mask) override {
-    if (interrupt_) {
-      (*interrupt_)();
+    if (*before_fetch_) {
+      (*before_fetch_)();
     }
     HEAD_response_t result;
     if (http_client) { 
@@ -247,9 +235,8 @@ private:
 
   bool is_gzipped;
   std::atomic<uint32_t>* failures_;
+  const std::function<void()>* before_fetch_;
   std::unique_ptr<ValhallaMobileHttpClient> http_client;
-  // Owned by GraphReader, which outlives this getter.
-  const interrupt_t* interrupt_ = nullptr;
 };
 
 // GraphReader remembers every tile it failed to fetch until it's rebuilt. This one forgets
@@ -427,7 +414,7 @@ ValhallaActor::ValhallaActor(const std::string& config_path,
         printf("[ValhallaActor] tile_url_gz is ignored for a tar tile_url or without a tile_dir\n");
       }
       tile_getter = std::make_unique<TileGetterWrapper>(std::move(http_client_owned), gzipped,
-                                                        &fetch_failures);
+                                                        &fetch_failures, &before_fetch);
     }
     graph_reader = std::make_unique<RetryingGraphReader>(
       mjolnir_config, std::move(tile_getter), &fetch_failures
@@ -439,33 +426,29 @@ ValhallaActor::ValhallaActor(const std::string& config_path,
     // absent or 0 means no limit, matching every other optional mjolnir key.
     set_tile_fetch_timeout_seconds(mjolnir_config.get<double>("tile_url_timeout", 0.0));
 
-    // Installed once, and it must outlive the reader: GraphReader stores the POINTER,
-    // it does not copy the function.
+    // Set only now, so fetches the reader makes while it is built, such as a remote tar's
+    // index, are never stopped. Throwing is how both stop an action.
     //
-    // Throwing is how the interrupt aborts -- curl_tilegetter's progress callback catches
-    // and returns -1 for exactly this, and TileGetterWrapper::get lets it propagate.
+    // [interrupt] is passed to every action, and thor runs it every few thousand steps of a
+    // path search, so it checks the cancel flag only. The deadline bounds fetching: a slow
+    // search over tiles already on disk is not a tile server that has gone away, and failing
+    // it as "tile fetch deadline" would tell the app to retry something that fails the same
+    // way every time.
     interrupt = [this]() {
-      // Cancellation first: a user who pressed stop should not wait out the deadline.
       if (cancelled->load(std::memory_order_relaxed)) {
         deadline_fired.store(true, std::memory_order_relaxed);
         throw Cancelled(kCancelledMessage);
       }
+    };
+    before_fetch = [this]() {
+      // Cancellation first: a user who pressed stop should not wait out the deadline.
+      interrupt();
       const auto limit = fetch_deadline.load(std::memory_order_relaxed);
-      if (limit == 0) {
-        return;
-      }
-      if (std::chrono::steady_clock::now().time_since_epoch().count() > limit) {
+      if (limit != 0 && std::chrono::steady_clock::now().time_since_epoch().count() > limit) {
         deadline_fired.store(true, std::memory_order_relaxed);
         throw TimedOut(kTimedOutMessage);
       }
     };
-    // Also set here, for any path that reaches the reader without going through a worker.
-    // It is NOT enough on its own: loki_worker_t::set_interrupt and thor_worker_t::set_interrupt
-    // both call reader->SetInterrupt(interrupt), and every action calls them with whatever that
-    // action was given -- which is nullptr unless one is passed. So an interrupt installed once
-    // at construction is overwritten with null by the first action that runs, which is why each
-    // action below passes it explicitly.
-    graph_reader->SetInterrupt(&interrupt);
 
     // Setup the actor
     actor = std::make_unique<valhalla::tyr::actor_t>(config, *graph_reader, true);

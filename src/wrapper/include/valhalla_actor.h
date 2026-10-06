@@ -49,6 +49,15 @@ public:
  */
 class ValhallaActor {
 private:
+    /// Passed to every action, so a [cancel] stops a path search as well as a fetch.
+    ///
+    /// This and [before_fetch] are declared before the reader and the actor, which hold
+    /// pointers to them, so they are destroyed after them.
+    std::function<void()> interrupt;
+    /// Run by the tile getter before every request: [interrupt], then the deadline, which
+    /// bounds fetching only.
+    std::function<void()> before_fetch;
+
     std::unique_ptr<valhalla::tyr::actor_t> actor;
     std::unique_ptr<valhalla::baldr::GraphReader> graph_reader;
 
@@ -57,8 +66,6 @@ private:
     /// When the action running now must stop fetching. Steady, so a clock change cannot
     /// move it. Set at the start of every action and read from the fetching thread.
     std::atomic<std::chrono::steady_clock::rep> fetch_deadline{0};
-    /// Installed on the GraphReader once, and held here because it stores the pointer.
-    std::function<void()> interrupt;
     /// Set by the interrupt when it fires, cleared when an action is armed.
     ///
     /// The exception the interrupt throws does not reach the caller: somewhere in the fetch
@@ -172,11 +179,12 @@ public:
     };
 
     /**
-     * Ask the action running now to stop at its next tile fetch.
+     * Ask the action running now to stop, before its next tile fetch or within a few
+     * thousand steps of its path search.
      *
-     * Checked in the same place as the deadline, so the granularity is one request: a fetch
-     * already in flight finishes or hits its own timeout. Sticky until [resume] clears it,
-     * because a cancel that raced ahead of the action it meant to stop would be ignored.
+     * A fetch already in flight finishes or hits its own timeout. Sticky until [resume]
+     * clears it, because a cancel that raced ahead of the action it meant to stop would
+     * otherwise be ignored.
      */
     void cancel();
 
